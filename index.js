@@ -15,7 +15,8 @@ let defaultClientId = "default";
 
 // Function to create a new WhatsApp client
 function createWhatsAppClient(clientId) {
-  // Improve puppeteer options for reliability in server environments
+  console.log(`Creating new WhatsApp client: ${clientId}`);
+
   const newClient = new Client({
     authStrategy: new LocalAuth({ clientId: clientId }),
     puppeteer: {
@@ -26,33 +27,36 @@ function createWhatsAppClient(clientId) {
         "--disable-accelerated-2d-canvas",
         "--no-first-run",
         "--no-zygote",
-        "--single-process", // This might help on some server setups
         "--disable-gpu",
         "--disable-extensions",
-        "--disable-features=site-per-process", // Try this if still having issues
-        "--window-size=1280,720", // Standardized window size
       ],
-      headless: true,
-      executablePath: process.env.CHROME_PATH || undefined, // Optional environment override
+      headless: false, // Set to true for production
       timeout: 60000, // Increase timeout to 1 minute
     },
   });
 
   const qrData = { qr: null, timestamp: null };
-  let initializationAttempts = 0;
-  const MAX_INIT_ATTEMPTS = 3;
 
-  // Add more detailed event handlers
+  // Add more detailed event handlers with debug logging
   newClient.on("qr", (qr) => {
+    console.log(
+      `QR Code generated for client ${clientId} at ${new Date().toLocaleString()}`
+    );
     qrData.qr = qr;
     qrData.timestamp = Date.now();
-    console.log(`QR code generated for client ${clientId}`);
   });
 
   newClient.on("ready", () => {
-    console.log(`WhatsApp client ${clientId} is ready!`);
+    console.log(
+      `WhatsApp client ${clientId} is ready at ${new Date().toLocaleString()}`
+    );
     qrData.qr = null;
-    initializationAttempts = 0; // Reset counter on successful connection
+  });
+
+  newClient.on("authenticated", () => {
+    console.log(
+      `WhatsApp client ${clientId} authenticated at ${new Date().toLocaleString()}`
+    );
   });
 
   newClient.on("disconnected", (reason) => {
@@ -65,43 +69,54 @@ function createWhatsAppClient(clientId) {
     console.error(`Authentication failure for client ${clientId}:`, msg);
   });
 
-  // Add more event handlers for better diagnostics
+  // Add debugging for critical events
   newClient.on("loading_screen", (percent, message) => {
     console.log(`WhatsApp loading (${clientId}): ${percent}% - ${message}`);
   });
 
-  // Handle initialization with retry logic
+  // Log all browser console messages
+  newClient.on("message_create", (msg) => {
+    console.log(`New message event for ${clientId}`);
+  });
+
   const initializeWithRetry = async () => {
-    if (initializationAttempts >= MAX_INIT_ATTEMPTS) {
-      console.error(
-        `Max initialization attempts reached for client ${clientId}`
-      );
-      return false;
-    }
+    let initializationAttempts = 0;
+    const MAX_INIT_ATTEMPTS = 3;
 
-    initializationAttempts++;
-    console.log(
-      `Initialization attempt ${initializationAttempts} for client ${clientId}`
-    );
-
-    try {
-      await newClient.initialize();
-      console.log(`Client ${clientId} successfully initialized`);
-      return true;
-    } catch (err) {
-      console.error(
-        `Failed to initialize client ${clientId} (attempt ${initializationAttempts}):`,
-        err
-      );
-
-      // Add delay before retry
-      if (initializationAttempts < MAX_INIT_ATTEMPTS) {
-        console.log(`Will retry in 5 seconds...`);
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-        return initializeWithRetry();
+    const tryInit = async () => {
+      if (initializationAttempts >= MAX_INIT_ATTEMPTS) {
+        console.error(
+          `Max initialization attempts reached for client ${clientId}`
+        );
+        return false;
       }
-      return false;
-    }
+
+      initializationAttempts++;
+      console.log(
+        `Initialization attempt ${initializationAttempts} for client ${clientId}`
+      );
+
+      try {
+        console.log(`Starting initialization for ${clientId}...`);
+        await newClient.initialize();
+        console.log(`Client ${clientId} successfully initialized`);
+        return true;
+      } catch (err) {
+        console.error(
+          `Failed to initialize client ${clientId} (attempt ${initializationAttempts}):`,
+          err
+        );
+
+        if (initializationAttempts < MAX_INIT_ATTEMPTS) {
+          console.log(`Will retry in 5 seconds...`);
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          return tryInit();
+        }
+        return false;
+      }
+    };
+
+    return tryInit();
   };
 
   return {
@@ -149,7 +164,7 @@ app.post("/create-client", async (req, res) => {
   }
 });
 
-// Update the QR endpoint to support forced regeneration
+// Update the QR endpoint with better monitoring
 app.get("/qr", async (req, res) => {
   const clientId = req.query.clientId || defaultClientId;
   const forceRefresh = req.query.refresh === "true";
@@ -176,20 +191,61 @@ app.get("/qr", async (req, res) => {
         }
       }
 
-      // Create a fresh client instance
+      // Create a fresh client instance with explicit debug logging
       clients[clientId] = createWhatsAppClient(clientId);
-      await clients[clientId].initializeWithRetry();
 
-      res.send(`
-        <h2>Regenerating QR Code for client ${clientId}</h2>
-        <p>Please wait a moment...</p>
-        <script>
-          setTimeout(() => window.location.href = '/qr?clientId=${clientId}', 5000);
-        </script>
-      `);
-      return;
+      // Initialize with QR monitoring
+      const initPromise = clients[clientId].client.initialize();
+
+      // Set a timeout to wait for the QR code
+      const qrPromise = new Promise((resolve) => {
+        const qrCheckInterval = setInterval(() => {
+          if (clients[clientId].qrData && clients[clientId].qrData.qr) {
+            clearInterval(qrCheckInterval);
+            resolve();
+          }
+        }, 1000);
+
+        // Give up after 30 seconds
+        setTimeout(() => {
+          clearInterval(qrCheckInterval);
+          resolve();
+        }, 30000);
+      });
+
+      // Wait for initialization or timeout
+      await initPromise;
+      await qrPromise;
+
+      // Check if we have a QR code or need to redirect
+      if (clients[clientId].qrData && clients[clientId].qrData.qr) {
+        const qrImage = await QRCode.toDataURL(clients[clientId].qrData.qr);
+        res.send(`
+          <h2>QR Code Generated for Client ${clientId}</h2>
+          <img src="${qrImage}" />
+          <p>Generated at: ${new Date().toLocaleString()}</p>
+          <p>If the QR code doesn't work, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
+        `);
+        return;
+      } else {
+        res.send(`
+          <h2>Regenerating QR Code for client ${clientId}</h2>
+          <p>Please wait a moment...</p>
+          <p>Debug: QR event didn't fire within timeout period.</p>
+          <script>
+            setTimeout(() => window.location.href = '/qr?clientId=${clientId}', 5000);
+          </script>
+        `);
+        return;
+      }
     } catch (err) {
       console.error(`Failed to refresh client ${clientId}:`, err);
+      res.send(`
+        <h2>Error Refreshing Client ${clientId}</h2>
+        <p>Error: ${err.message}</p>
+        <p><a href="/qr?clientId=${clientId}&refresh=true">Try again</a></p>
+      `);
+      return;
     }
   }
 
@@ -198,44 +254,112 @@ app.get("/qr", async (req, res) => {
   const hasPupPage = client && client.pupPage;
   const hasQR = clientData.qrData && clientData.qrData.qr;
 
+  // Add debug logging
+  console.log(`Client ${clientId} status:`, {
+    isConnected,
+    hasPupPage,
+    hasQR,
+    qrTimestamp: clientData.qrData ? clientData.qrData.timestamp : null,
+  });
+
   // If not connected and no QR, attempt to initialize
   if (!isConnected && !hasQR) {
     try {
       if (!hasPupPage) {
         console.log(`Initializing client ${clientId} to generate QR code`);
 
-        // Use a timeout promise to prevent hanging
+        // Track start time for QR generation
+        const startTime = Date.now();
+
+        // Initialize client with timeout
+        const initPromise = client.initialize();
         const timeoutPromise = new Promise((_, reject) => {
           setTimeout(() => reject(new Error("Initialization timeout")), 30000);
         });
 
         try {
-          await Promise.race([client.initialize(), timeoutPromise]);
+          await Promise.race([initPromise, timeoutPromise]);
+
+          // Wait for up to 10 seconds for QR to be generated
+          const qrWaitPromise = new Promise((resolve) => {
+            const checkInterval = setInterval(() => {
+              if (clientData.qrData && clientData.qrData.qr) {
+                clearInterval(checkInterval);
+                resolve(true);
+              } else if (Date.now() - startTime > 10000) {
+                clearInterval(checkInterval);
+                resolve(false);
+              }
+            }, 1000);
+          });
+
+          const qrGenerated = await qrWaitPromise;
+
+          if (qrGenerated) {
+            // We got a QR code, show it
+            const qrImage = await QRCode.toDataURL(clientData.qrData.qr);
+            return res.send(`
+              <h2>Scan this QR with WhatsApp for Client ${clientId}</h2>
+              <img src="${qrImage}" />
+              <p>Generated at: ${new Date(
+                clientData.qrData.timestamp
+              ).toLocaleString()}</p>
+              <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
+            `);
+          }
         } catch (err) {
           console.error(
             `Client ${clientId} initialization failed:`,
             err.message
           );
-
           return res.send(`
             <h2>WhatsApp Connection Error</h2>
             <p>There was a problem initializing the WhatsApp connection:</p>
             <pre>${err.message}</pre>
             
-            <h3>This is likely due to missing dependencies on the server</h3>
-            <p>The server needs to install Chrome dependencies:</p>
-            <pre>sudo apt-get update
-sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 
-libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libnss3 libx11-xcb1 libxss1</pre>
+            <h3>Troubleshooting Steps</h3>
+            <ul>
+              <li>Make sure your internet connection is stable</li>
+              <li>Try restarting your application</li>
+              <li>Check if WhatsApp Web is accessible in your browser</li>
+            </ul>
             
-            <p><a href="/system-check">Run System Check</a> | <a href="/qr?clientId=${clientId}&refresh=true">Try Again</a></p>
+            <p><a href="/qr?clientId=${clientId}&refresh=true">Try Again</a></p>
           `);
         }
       }
 
-      // Rest of your existing code...
+      // Check if the QR was generated while we were waiting
+      if (clientData.qrData && clientData.qrData.qr) {
+        const qrImage = await QRCode.toDataURL(clientData.qrData.qr);
+        return res.send(`
+          <h2>Scan this QR with WhatsApp for Client ${clientId}</h2>
+          <img src="${qrImage}" />
+          <p>Generated at: ${new Date(
+            clientData.qrData.timestamp
+          ).toLocaleString()}</p>
+          <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
+        `);
+      }
+
+      // If we're still waiting for WhatsApp to generate the QR
+      return res.send(`
+        <h2>WhatsApp Client ${clientId} Initializing</h2>
+        <p>Please wait while we generate a QR code...</p>
+        <p>Connection details: Connected=${isConnected}, Browser=${
+        hasPupPage ? "Active" : "Not Active"
+      }</p>
+        <p><a href="/qr?clientId=${clientId}&refresh=true">Force refresh QR code</a></p>
+        <script>setTimeout(() => window.location.reload(), 3000);</script>
+      `);
     } catch (err) {
-      // Rest of your existing error handling...
+      console.error(`Failed to initialize client ${clientId}:`, err);
+      return res.send(`
+        <h2>WhatsApp Initialization Error</h2>
+        <p>There was an error initializing the WhatsApp client:</p>
+        <pre>${err.message}</pre>
+        <p><a href="/qr?clientId=${clientId}&refresh=true">Try again</a></p>
+      `);
     }
   }
 
