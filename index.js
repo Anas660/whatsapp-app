@@ -65,27 +65,72 @@ app.post("/create-client", async (req, res) => {
   }
 });
 
-// Endpoint to get QR for a specific client
+// Update the QR endpoint to support forced regeneration
 app.get("/qr", async (req, res) => {
   const clientId = req.query.clientId || defaultClientId;
+  const forceRefresh = req.query.refresh === "true";
 
   if (!clients[clientId]) {
     return res.status(404).json({ error: `Client ${clientId} not found` });
   }
 
-  const { client, qrData } = clients[clientId];
+  const clientData = clients[clientId];
+  const client = clientData.client;
 
-  // If not connected, ensure we're initializing
-  if (!client.info && !client.pupPage) {
+  // Force reconnect if requested
+  if (forceRefresh) {
     try {
-      await client.initialize();
-      console.log(`Client ${clientId} initialization started`);
+      console.log(`Forcing QR refresh for client ${clientId}`);
 
-      // Give it a moment to generate QR
-      if (!qrData.qr) {
+      // Destroy the existing client if possible
+      if (client) {
+        try {
+          await client.destroy();
+          console.log(`Destroyed client ${clientId} for QR refresh`);
+        } catch (e) {
+          console.log(`Error destroying client ${clientId}: ${e.message}`);
+        }
+      }
+
+      // Create a fresh client instance
+      clients[clientId] = createWhatsAppClient(clientId);
+      await clients[clientId].client.initialize();
+
+      res.send(`
+        <h2>Regenerating QR Code for client ${clientId}</h2>
+        <p>Please wait a moment...</p>
+        <script>
+          setTimeout(() => window.location.href = '/qr?clientId=${clientId}', 5000);
+        </script>
+      `);
+      return;
+    } catch (err) {
+      console.error(`Failed to refresh client ${clientId}:`, err);
+    }
+  }
+
+  // Current client status details for better diagnostics
+  const isConnected = client && client.info;
+  const hasPupPage = client && client.pupPage;
+  const hasQR = clientData.qrData && clientData.qrData.qr;
+
+  // If not connected and no QR, attempt to initialize
+  if (!isConnected && !hasQR) {
+    try {
+      if (!hasPupPage) {
+        console.log(`Initializing client ${clientId} to generate QR code`);
+        await client.initialize();
+      }
+
+      // Wait briefly to give it a chance to generate QR
+      if (!clientData.qrData.qr) {
         return res.send(`
-          <h2>WhatsApp Client ${clientId} Connecting</h2>
+          <h2>WhatsApp Client ${clientId} Initializing</h2>
           <p>Please wait while we generate a QR code...</p>
+          <p>Connection details: Connected=${isConnected}, Browser=${
+          hasPupPage ? "Active" : "Not Active"
+        }</p>
+          <p><a href="/qr?clientId=${clientId}&refresh=true">Force refresh QR code</a></p>
           <script>setTimeout(() => window.location.reload(), 3000);</script>
         `);
       }
@@ -94,18 +139,39 @@ app.get("/qr", async (req, res) => {
     }
   }
 
-  if (!qrData.qr) {
-    return res.send(
-      `WhatsApp client ${clientId} is already connected or QR not generated yet.`
-    );
+  // Client is fully connected
+  if (isConnected) {
+    return res.send(`
+      <h2>WhatsApp client ${clientId} is connected</h2>
+      <p>Connected as: ${client.info.pushname} (${client.info.wid.user})</p>
+      <p>If you want to reconnect with a different account, first logout:</p>
+      <p><a href="/logout?clientId=${clientId}">Logout</a> | <a href="/qr?clientId=${clientId}&refresh=true">Force new QR Code</a></p>
+    `);
   }
 
+  // Still no QR code available
+  if (!hasQR) {
+    return res.send(`
+      <h2>QR Code Not Available for ${clientId}</h2>
+      <p>Connection details: Connected=${isConnected}, Browser=${
+      hasPupPage ? "Active" : "Not Active"
+    }</p>
+      <p>The system hasn't generated a QR code yet.</p>
+      <p><a href="/qr?clientId=${clientId}&refresh=true">Force refresh QR code</a></p>
+      <script>setTimeout(() => window.location.reload(), 3000);</script>
+    `);
+  }
+
+  // We have a QR code, show it
   res.setHeader("Content-Type", "text/html");
-  const qrImage = await QRCode.toDataURL(qrData.qr);
+  const qrImage = await QRCode.toDataURL(clientData.qrData.qr);
   res.send(`
     <h2>Scan this QR with WhatsApp for Client ${clientId}</h2>
     <img src="${qrImage}" />
-    <p>Generated at: ${new Date(qrData.timestamp).toLocaleString()}</p>
+    <p>Generated at: ${new Date(
+      clientData.qrData.timestamp
+    ).toLocaleString()}</p>
+    <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
   `);
 });
 
@@ -202,8 +268,8 @@ app.get("/", (req, res) => {
                 }
               </td>
               <td>
-                <a href="/qr/${client.id}">QR Code</a> | 
-                <a href="/status/${client.id}">Status</a>
+                <a href="/qr?clientId=${client.id}">QR Code</a> | 
+                <a href="/status?clientId=${client.id}">Status</a>
               </td>
             </tr>
           `
