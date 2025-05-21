@@ -9,50 +9,128 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Add after your imports
-let latestQR = null;
+// Add this near the top of your file, after imports
+const clients = {};
+let defaultClientId = "default";
 
-// WhatsApp client setup
-const client = new Client({
-  authStrategy: new LocalAuth(),
-});
+// Function to create a new WhatsApp client
+function createWhatsAppClient(clientId) {
+  const newClient = new Client({
+    authStrategy: new LocalAuth({ clientId: clientId }),
+  });
 
-client.on("qr", (qr) => {
-  latestQR = qr; // Save the QR code string
-  console.log("Scan this QR code with your WhatsApp app:");
-  console.log(qr);
-});
+  const qrData = { qr: null, timestamp: null };
 
-client.on("ready", () => {
-  console.log("WhatsApp client is ready!");
-  latestQR = null; // Clear QR when ready
-});
+  newClient.on("qr", (qr) => {
+    qrData.qr = qr;
+    qrData.timestamp = Date.now();
+    console.log(`QR code generated for client ${clientId}`);
+  });
 
-client.initialize();
+  newClient.on("ready", () => {
+    console.log(`WhatsApp client ${clientId} is ready!`);
+    qrData.qr = null;
+  });
 
-app.get("/qr", async (req, res) => {
-  if (!latestQR) {
-    return res.send("WhatsApp is already connected or QR not generated yet.");
+  newClient.on("disconnected", () => {
+    console.log(`WhatsApp client ${clientId} disconnected`);
+  });
+
+  return { client: newClient, qrData };
+}
+
+// Initialize the default client
+clients[defaultClientId] = createWhatsAppClient(defaultClientId);
+clients[defaultClientId].client.initialize();
+
+// Create endpoint to generate a new client
+app.post("/create-client", async (req, res) => {
+  try {
+    const { clientId } = req.body;
+
+    if (!clientId) {
+      return res.status(400).json({ error: "clientId is required" });
+    }
+
+    if (clients[clientId]) {
+      return res.status(400).json({ error: "Client ID already exists" });
+    }
+
+    clients[clientId] = createWhatsAppClient(clientId);
+    clients[clientId].client.initialize();
+
+    res.json({ success: true, message: `Client ${clientId} created` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.setHeader("Content-Type", "text/html");
-  const qrImage = await QRCode.toDataURL(latestQR);
-  res.send(`<h2>Scan this QR with WhatsApp</h2><img src="${qrImage}" />`);
 });
 
-// API endpoint to send a message
+// Endpoint to get QR for a specific client
+app.get("/qr/:clientId?", async (req, res) => {
+  const clientId = req.params.clientId || defaultClientId;
+
+  if (!clients[clientId]) {
+    return res.status(404).json({ error: `Client ${clientId} not found` });
+  }
+
+  const { client, qrData } = clients[clientId];
+
+  // If not connected, ensure we're initializing
+  if (!client.info && !client.pupPage) {
+    try {
+      await client.initialize();
+      console.log(`Client ${clientId} initialization started`);
+
+      // Give it a moment to generate QR
+      if (!qrData.qr) {
+        return res.send(`
+          <h2>WhatsApp Client ${clientId} Connecting</h2>
+          <p>Please wait while we generate a QR code...</p>
+          <script>setTimeout(() => window.location.reload(), 3000);</script>
+        `);
+      }
+    } catch (err) {
+      console.error(`Failed to initialize client ${clientId}:`, err);
+    }
+  }
+
+  if (!qrData.qr) {
+    return res.send(
+      `WhatsApp client ${clientId} is already connected or QR not generated yet.`
+    );
+  }
+
+  res.setHeader("Content-Type", "text/html");
+  const qrImage = await QRCode.toDataURL(qrData.qr);
+  res.send(`
+    <h2>Scan this QR with WhatsApp for Client ${clientId}</h2>
+    <img src="${qrImage}" />
+    <p>Generated at: ${new Date(qrData.timestamp).toLocaleString()}</p>
+  `);
+});
+
+// Update the send-message endpoint to work with multiple clients
 app.post("/send-message", async (req, res) => {
-  const { number, message, pdfUrl } = req.body;
+  const { number, message, pdfUrl, clientId = defaultClientId } = req.body;
 
   if (!number || (!message && !pdfUrl)) {
-    return res
-      .status(400)
-      .json({ error: "number and message or pdfUrl are required" });
+    return res.status(400).json({
+      error: "number and message or pdfUrl are required",
+    });
   }
+
+  if (!clients[clientId]) {
+    return res.status(404).json({
+      error: `Client ${clientId} not found`,
+    });
+  }
+
+  const client = clients[clientId].client;
 
   if (!client || !client.info) {
     return res.status(503).json({
       error: "WhatsApp client not connected",
-      message: "Please connect WhatsApp first using the QR code",
+      message: `Please connect WhatsApp client ${clientId} first using the QR code`,
     });
   }
 
@@ -68,75 +146,6 @@ app.post("/send-message", async (req, res) => {
   } catch (err) {
     console.error("Send message error:", err);
     res.status(500).json({ error: err.message });
-  }
-});
-
-// Check connection status
-app.get("/status", (req, res) => {
-  res.json({
-    connected: client.info ? true : false,
-    info: client.info || null,
-  });
-});
-
-// Logout from WhatsApp
-app.post("/logout", async (req, res) => {
-  try {
-    if (!client || !client.pupPage) {
-      return res.json({ success: true, message: "Already disconnected" });
-    }
-
-    try {
-      await client.logout().catch((err) => {
-        console.log("Logout error handled:", err.message);
-      });
-    } catch (error) {
-      console.error("Error during logout:", error);
-      // Continue execution even if logout fails
-    }
-
-    res.json({ success: true, message: "Logged out successfully" });
-  } catch (err) {
-    console.error("Logout endpoint error:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to logout safely", details: err.message });
-  }
-});
-
-// Force reconnection
-app.post("/reconnect", async (req, res) => {
-  try {
-    // Safely destroy the client if it exists
-    if (client) {
-      try {
-        if (client.pupPage) {
-          await client.destroy().catch((err) => {
-            console.log("Client destroy error handled:", err.message);
-          });
-        }
-      } catch (error) {
-        console.error("Error during client destroy:", error);
-        // Continue execution even if destroy fails
-      }
-    }
-
-    // Reset QR code
-    latestQR = null;
-
-    // Initialize a new client
-    setTimeout(() => {
-      client.initialize().catch((err) => {
-        console.error("Client initialization error:", err);
-      });
-    }, 1000);
-
-    res.json({ success: true, message: "Reconnecting WhatsApp..." });
-  } catch (err) {
-    console.error("Reconnect endpoint error:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to reconnect", details: err.message });
   }
 });
 
@@ -156,7 +165,9 @@ app.get("/", (req, res) => {
     </head>
     <body>
       <h1>WhatsApp API for Laravel CMS</h1>
-      <p>Status: ${client.info ? "Connected" : "Disconnected"}</p>
+      <p>Status: ${
+        clients[defaultClientId].client.info ? "Connected" : "Disconnected"
+      }</p>
       <p>Use <a href="/qr">/qr</a> to scan and connect WhatsApp.</p>
       
       <h2>API Endpoints</h2>
