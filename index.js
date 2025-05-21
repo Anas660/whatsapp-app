@@ -17,6 +17,18 @@ let defaultClientId = "default";
 function createWhatsAppClient(clientId) {
   const newClient = new Client({
     authStrategy: new LocalAuth({ clientId: clientId }),
+    puppeteer: {
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--disable-gpu",
+      ],
+      headless: true,
+    },
   });
 
   const qrData = { qr: null, timestamp: null };
@@ -34,6 +46,11 @@ function createWhatsAppClient(clientId) {
 
   newClient.on("disconnected", () => {
     console.log(`WhatsApp client ${clientId} disconnected`);
+  });
+
+  // Add error handling for initialization
+  newClient.on("auth_failure", (msg) => {
+    console.error(`Authentication failure for client ${clientId}:`, msg);
   });
 
   return { client: newClient, qrData };
