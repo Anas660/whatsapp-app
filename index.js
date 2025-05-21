@@ -30,7 +30,7 @@ function createWhatsAppClient(clientId) {
         "--disable-gpu",
         "--disable-extensions",
       ],
-      headless: false, // Set to true for production
+      headless: "new", // Use the new headless mode
       timeout: 60000, // Increase timeout to 1 minute
     },
   });
