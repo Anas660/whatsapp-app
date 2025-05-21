@@ -150,64 +150,148 @@ app.post("/send-message", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
+  // Get list of all clients
+  const clientsList = Object.keys(clients).map((id) => {
+    const client = clients[id].client;
+    return {
+      id,
+      connected: client && client.info ? true : false,
+      name: client && client.info ? client.info.pushname : null,
+    };
+  });
+
   res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>WhatsApp API for Laravel CMS</title>
-      <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; }
-        pre { background: #f4f4f4; padding: 10px; border-radius: 3px; overflow-x: auto; }
-        .endpoint { margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
-        h3 { color: #333; }
-      </style>
-    </head>
-    <body>
-      <h1>WhatsApp API for Laravel CMS</h1>
-      <p>Status: ${
-        clients[defaultClientId].client.info ? "Connected" : "Disconnected"
-      }</p>
-      <p>Use <a href="/qr">/qr</a> to scan and connect WhatsApp.</p>
-      
-      <h2>API Endpoints</h2>
-      
-      <div class="endpoint">
-        <h3>Send Message</h3>
-        <code>POST /send-message</code>
-        <pre>{
-  "number": "923001234567", 
-  "message": "Your invoice is ready",
-  "pdfUrl": "https://example.com/invoice.pdf" (optional)
-}</pre>
-      </div>
-      
-      <div class="endpoint">
-        <h3>Send to Multiple Recipients</h3>
-        <code>POST /broadcast</code>
-        <pre>{
-  "numbers": ["923001234567", "923001234568"],
-  "message": "Your invoice is ready",
-  "pdfUrl": "https://example.com/invoice.pdf" (optional)
-}</pre>
-      </div>
-
-      <div class="endpoint">
-        <h3>Connection Management</h3>
-        <code>GET /status</code> - Check connection status<br>
-        <code>POST /logout</code> - Logout from WhatsApp<br>
-        <code>POST /reconnect</code> - Force reconnection<br>
-      </div>
-    </body>
-    </html>
-  `);
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>WhatsApp API for Laravel CMS</title>
+        <style>
+          body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+          code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; }
+          pre { background: #f4f4f4; padding: 10px; border-radius: 3px; overflow-x: auto; }
+          .endpoint { margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+          .client-card { border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; border-radius: 4px; }
+          .connected { color: green; }
+          .disconnected { color: red; }
+          h3 { color: #333; }
+          table { border-collapse: collapse; width: 100%; }
+          th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+          tr:hover { background-color: #f5f5f5; }
+        </style>
+      </head>
+      <body>
+        <h1>WhatsApp API for Laravel CMS</h1>
+        
+        <h2>Clients</h2>
+        <table>
+          <tr>
+            <th>Client ID</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+          ${clientsList
+            .map(
+              (client) => `
+            <tr>
+              <td>${client.id}</td>
+              <td class="${client.connected ? "connected" : "disconnected"}">
+                ${
+                  client.connected
+                    ? `Connected (${client.name})`
+                    : "Disconnected"
+                }
+              </td>
+              <td>
+                <a href="/qr/${client.id}">QR Code</a> | 
+                <a href="/status/${client.id}">Status</a>
+              </td>
+            </tr>
+          `
+            )
+            .join("")}
+        </table>
+        
+        <h3>Create New Client</h3>
+        <form id="createClient" style="margin-bottom: 20px;">
+          <input type="text" id="newClientId" placeholder="Enter client ID" required>
+          <button type="submit">Create Client</button>
+        </form>
+        
+        <h2>API Endpoints</h2>
+        
+        <div class="endpoint">
+          <h3>Send Message</h3>
+          <code>POST /send-message</code>
+          <pre>{
+    "number": "923001234567", 
+    "message": "Your invoice is ready",
+    "pdfUrl": "https://example.com/invoice.pdf" (optional),
+    "clientId": "default" (optional)
+  }</pre>
+        </div>
+        
+        <div class="endpoint">
+          <h3>Send to Multiple Recipients</h3>
+          <code>POST /broadcast</code>
+          <pre>{
+    "numbers": ["923001234567", "923001234568"],
+    "message": "Your invoice is ready",
+    "pdfUrl": "https://example.com/invoice.pdf" (optional),
+    "clientId": "default" (optional)
+  }</pre>
+        </div>
+        
+        <div class="endpoint">
+          <h3>Send Image</h3>
+          <code>POST /send-image</code>
+          <pre>{
+    "number": "923001234567", 
+    "caption": "Your product image",
+    "imageUrl": "https://example.com/image.jpg",
+    "clientId": "default" (optional)
+  }</pre>
+        </div>
+  
+        <div class="endpoint">
+          <h3>Connection Management</h3>
+          <code>GET /status/:clientId?</code> - Check connection status<br>
+          <code>POST /logout/:clientId?</code> - Logout from WhatsApp<br>
+          <code>POST /reconnect/:clientId?</code> - Force reconnection<br>
+          <code>POST /create-client</code> - Create a new client<br>
+          <code>GET /qr/:clientId?</code> - Get QR code for connection<br>
+        </div>
+        
+        <script>
+          document.getElementById('createClient').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const clientId = document.getElementById('newClientId').value;
+            
+            fetch('/create-client', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ clientId })
+            })
+            .then(response => response.json())
+            .then(data => {
+              if (data.success) {
+                alert('Client created! Redirecting to QR code page...');
+                window.location.href = '/qr/' + clientId;
+              } else {
+                alert('Error: ' + data.error);
+              }
+            })
+            .catch(err => alert('Error: ' + err));
+          });
+        </script>
+      </body>
+      </html>
+    `);
 });
-
 // Add these endpoints after your existing ones
 
 // Send to multiple recipients at once
 app.post("/broadcast", async (req, res) => {
-  const { numbers, message, pdfUrl } = req.body;
+  const { numbers, message, pdfUrl, clientId = defaultClientId } = req.body;
 
   if (!numbers || !Array.isArray(numbers) || numbers.length === 0) {
     return res
@@ -217,6 +301,19 @@ app.post("/broadcast", async (req, res) => {
 
   if (!message && !pdfUrl) {
     return res.status(400).json({ error: "Message or pdfUrl is required" });
+  }
+
+  if (!clients[clientId]) {
+    return res.status(404).json({ error: `Client ${clientId} not found` });
+  }
+
+  const client = clients[clientId].client;
+
+  if (!client || !client.info) {
+    return res.status(503).json({
+      error: "WhatsApp client not connected",
+      message: `Please connect WhatsApp client ${clientId} first using the QR code`,
+    });
   }
 
   try {
@@ -251,10 +348,23 @@ app.post("/broadcast", async (req, res) => {
 
 // Send an image with a message
 app.post("/send-image", async (req, res) => {
-  const { number, caption, imageUrl } = req.body;
+  const { number, caption, imageUrl, clientId = defaultClientId } = req.body;
 
   if (!number || !imageUrl) {
     return res.status(400).json({ error: "number and imageUrl are required" });
+  }
+
+  if (!clients[clientId]) {
+    return res.status(404).json({ error: `Client ${clientId} not found` });
+  }
+
+  const client = clients[clientId].client;
+
+  if (!client || !client.info) {
+    return res.status(503).json({
+      error: "WhatsApp client not connected",
+      message: `Please connect WhatsApp client ${clientId} first using the QR code`,
+    });
   }
 
   try {
@@ -269,8 +379,23 @@ app.post("/send-image", async (req, res) => {
 
 // Get information about a chat/contact
 app.get("/chat-info/:number", async (req, res) => {
+  const { clientId = defaultClientId } = req.query;
+  const number = req.params.number;
+
+  if (!clients[clientId]) {
+    return res.status(404).json({ error: `Client ${clientId} not found` });
+  }
+
+  const client = clients[clientId].client;
+
+  if (!client || !client.info) {
+    return res.status(503).json({
+      error: "WhatsApp client not connected",
+      message: `Please connect WhatsApp client ${clientId} first using the QR code`,
+    });
+  }
+
   try {
-    const number = req.params.number;
     const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
     const chat = await client.getChatById(chatId);
 
@@ -286,6 +411,91 @@ app.get("/chat-info/:number", async (req, res) => {
     });
   } catch (err) {
     res.status(404).json({ error: "Chat not found or unavailable" });
+  }
+});
+
+// Status endpoint
+app.get("/status/:clientId?", async (req, res) => {
+  const clientId = req.params.clientId || defaultClientId;
+
+  if (!clients[clientId]) {
+    return res.status(404).json({ error: `Client ${clientId} not found` });
+  }
+
+  const client = clients[clientId].client;
+  const isConnected = client && client.info ? true : false;
+
+  res.json({
+    success: true,
+    client: clientId,
+    connected: isConnected,
+    info: isConnected
+      ? {
+          name: client.info.pushname,
+          phone: client.info.wid.user,
+        }
+      : null,
+  });
+});
+
+// Logout endpoint
+app.post("/logout/:clientId?", async (req, res) => {
+  const clientId = req.params.clientId || defaultClientId;
+
+  if (!clients[clientId]) {
+    return res.status(404).json({ error: `Client ${clientId} not found` });
+  }
+
+  const client = clients[clientId].client;
+
+  try {
+    if (client && client.info) {
+      await client.logout();
+      console.log(`Client ${clientId} logged out`);
+    }
+
+    // Recreate the client
+    clients[clientId] = createWhatsAppClient(clientId);
+    clients[clientId].client.initialize();
+
+    res.json({
+      success: true,
+      message: `WhatsApp client ${clientId} logged out`,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reconnect endpoint
+app.post("/reconnect/:clientId?", async (req, res) => {
+  const clientId = req.params.clientId || defaultClientId;
+
+  if (!clients[clientId]) {
+    return res.status(404).json({ error: `Client ${clientId} not found` });
+  }
+
+  try {
+    // Stop the current client if exists
+    if (clients[clientId].client) {
+      try {
+        await clients[clientId].client.destroy();
+        console.log(`Client ${clientId} destroyed`);
+      } catch (e) {
+        console.log(`Error destroying client ${clientId}:`, e.message);
+      }
+    }
+
+    // Create a new client instance
+    clients[clientId] = createWhatsAppClient(clientId);
+    clients[clientId].client.initialize();
+
+    res.json({
+      success: true,
+      message: `Reconnecting WhatsApp client ${clientId}. Use /qr/${clientId} to scan the QR code.`,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
