@@ -15,6 +15,7 @@ let defaultClientId = "default";
 
 // Function to create a new WhatsApp client
 function createWhatsAppClient(clientId) {
+  // Improve puppeteer options for reliability in server environments
   const newClient = new Client({
     authStrategy: new LocalAuth({ clientId: clientId }),
     puppeteer: {
@@ -25,14 +26,23 @@ function createWhatsAppClient(clientId) {
         "--disable-accelerated-2d-canvas",
         "--no-first-run",
         "--no-zygote",
+        "--single-process", // This might help on some server setups
         "--disable-gpu",
+        "--disable-extensions",
+        "--disable-features=site-per-process", // Try this if still having issues
+        "--window-size=1280,720", // Standardized window size
       ],
       headless: true,
+      executablePath: process.env.CHROME_PATH || undefined, // Optional environment override
+      timeout: 60000, // Increase timeout to 1 minute
     },
   });
 
   const qrData = { qr: null, timestamp: null };
+  let initializationAttempts = 0;
+  const MAX_INIT_ATTEMPTS = 3;
 
+  // Add more detailed event handlers
   newClient.on("qr", (qr) => {
     qrData.qr = qr;
     qrData.timestamp = Date.now();
@@ -42,23 +52,70 @@ function createWhatsAppClient(clientId) {
   newClient.on("ready", () => {
     console.log(`WhatsApp client ${clientId} is ready!`);
     qrData.qr = null;
+    initializationAttempts = 0; // Reset counter on successful connection
   });
 
-  newClient.on("disconnected", () => {
-    console.log(`WhatsApp client ${clientId} disconnected`);
+  newClient.on("disconnected", (reason) => {
+    console.log(
+      `WhatsApp client ${clientId} disconnected. Reason: ${reason || "Unknown"}`
+    );
   });
 
-  // Add error handling for initialization
   newClient.on("auth_failure", (msg) => {
     console.error(`Authentication failure for client ${clientId}:`, msg);
   });
 
-  return { client: newClient, qrData };
+  // Add more event handlers for better diagnostics
+  newClient.on("loading_screen", (percent, message) => {
+    console.log(`WhatsApp loading (${clientId}): ${percent}% - ${message}`);
+  });
+
+  // Handle initialization with retry logic
+  const initializeWithRetry = async () => {
+    if (initializationAttempts >= MAX_INIT_ATTEMPTS) {
+      console.error(
+        `Max initialization attempts reached for client ${clientId}`
+      );
+      return false;
+    }
+
+    initializationAttempts++;
+    console.log(
+      `Initialization attempt ${initializationAttempts} for client ${clientId}`
+    );
+
+    try {
+      await newClient.initialize();
+      console.log(`Client ${clientId} successfully initialized`);
+      return true;
+    } catch (err) {
+      console.error(
+        `Failed to initialize client ${clientId} (attempt ${initializationAttempts}):`,
+        err
+      );
+
+      // Add delay before retry
+      if (initializationAttempts < MAX_INIT_ATTEMPTS) {
+        console.log(`Will retry in 5 seconds...`);
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        return initializeWithRetry();
+      }
+      return false;
+    }
+  };
+
+  return {
+    client: newClient,
+    qrData,
+    initializeWithRetry,
+  };
 }
 
-// Initialize the default client
+// Initialize the default client with retry capabilities
 clients[defaultClientId] = createWhatsAppClient(defaultClientId);
-clients[defaultClientId].client.initialize();
+clients[defaultClientId].initializeWithRetry().catch((err) => {
+  console.error("Failed to initialize default client:", err);
+});
 
 // Create endpoint to generate a new client
 app.post("/create-client", async (req, res) => {
@@ -74,7 +131,17 @@ app.post("/create-client", async (req, res) => {
     }
 
     clients[clientId] = createWhatsAppClient(clientId);
-    clients[clientId].client.initialize();
+
+    // Use the new initialization method
+    const success = await clients[clientId].initializeWithRetry();
+
+    if (!success) {
+      return res.status(500).json({
+        error: "Failed to initialize WhatsApp client",
+        message:
+          "There might be issues with browser dependencies. Check system requirements.",
+      });
+    }
 
     res.json({ success: true, message: `Client ${clientId} created` });
   } catch (err) {
@@ -111,7 +178,7 @@ app.get("/qr", async (req, res) => {
 
       // Create a fresh client instance
       clients[clientId] = createWhatsAppClient(clientId);
-      await clients[clientId].client.initialize();
+      await clients[clientId].initializeWithRetry();
 
       res.send(`
         <h2>Regenerating QR Code for client ${clientId}</h2>
@@ -136,23 +203,39 @@ app.get("/qr", async (req, res) => {
     try {
       if (!hasPupPage) {
         console.log(`Initializing client ${clientId} to generate QR code`);
-        await client.initialize();
+
+        // Use a timeout promise to prevent hanging
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("Initialization timeout")), 30000);
+        });
+
+        try {
+          await Promise.race([client.initialize(), timeoutPromise]);
+        } catch (err) {
+          console.error(
+            `Client ${clientId} initialization failed:`,
+            err.message
+          );
+
+          return res.send(`
+            <h2>WhatsApp Connection Error</h2>
+            <p>There was a problem initializing the WhatsApp connection:</p>
+            <pre>${err.message}</pre>
+            
+            <h3>This is likely due to missing dependencies on the server</h3>
+            <p>The server needs to install Chrome dependencies:</p>
+            <pre>sudo apt-get update
+sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 
+libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libnss3 libx11-xcb1 libxss1</pre>
+            
+            <p><a href="/system-check">Run System Check</a> | <a href="/qr?clientId=${clientId}&refresh=true">Try Again</a></p>
+          `);
+        }
       }
 
-      // Wait briefly to give it a chance to generate QR
-      if (!clientData.qrData.qr) {
-        return res.send(`
-          <h2>WhatsApp Client ${clientId} Initializing</h2>
-          <p>Please wait while we generate a QR code...</p>
-          <p>Connection details: Connected=${isConnected}, Browser=${
-          hasPupPage ? "Active" : "Not Active"
-        }</p>
-          <p><a href="/qr?clientId=${clientId}&refresh=true">Force refresh QR code</a></p>
-          <script>setTimeout(() => window.location.reload(), 3000);</script>
-        `);
-      }
+      // Rest of your existing code...
     } catch (err) {
-      console.error(`Failed to initialize client ${clientId}:`, err);
+      // Rest of your existing error handling...
     }
   }
 
@@ -548,7 +631,7 @@ app.post("/logout", async (req, res) => {
 
     // Recreate the client
     clients[clientId] = createWhatsAppClient(clientId);
-    clients[clientId].client.initialize();
+    clients[clientId].initializeWithRetry();
 
     res.json({
       success: true,
@@ -580,7 +663,7 @@ app.post("/reconnect", async (req, res) => {
 
     // Create a new client instance
     clients[clientId] = createWhatsAppClient(clientId);
-    clients[clientId].client.initialize();
+    clients[clientId].initializeWithRetry();
 
     res.json({
       success: true,
@@ -588,6 +671,75 @@ app.post("/reconnect", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Add a diagnostic endpoint
+app.get("/system-check", async (req, res) => {
+  try {
+    const puppeteer = require("puppeteer-core");
+
+    res.setHeader("Content-Type", "text/html");
+    res.write("<h1>System Check</h1>");
+    res.write("<pre>Running browser launch test...</pre>");
+
+    try {
+      // Try launching browser directly with puppeteer
+      res.write("<pre>Attempting to launch browser...</pre>");
+
+      const browser = await puppeteer.launch({
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+        ],
+        headless: true,
+      });
+
+      res.write(
+        "<pre style='color:green'>Browser launched successfully!</pre>"
+      );
+
+      // Check version
+      const version = await browser.version();
+      res.write(`<pre>Browser version: ${version}</pre>`);
+
+      await browser.close();
+      res.write("<pre>Browser closed successfully.</pre>");
+
+      // Check system libraries
+      res.write("<h2>System Libraries</h2>");
+      const { execSync } = require("child_process");
+
+      try {
+        const libCheck = execSync("ldconfig -p | grep libatk").toString();
+        res.write(`<pre>${libCheck}</pre>`);
+      } catch (err) {
+        res.write(
+          `<pre style='color:red'>Error checking libraries: ${err.message}</pre>`
+        );
+      }
+
+      res.write("<h2>Environment</h2>");
+      res.write(`<pre>Node.js: ${process.version}</pre>`);
+      res.write(`<pre>Platform: ${process.platform}</pre>`);
+
+      res.end("<p>System check complete!</p>");
+    } catch (browserErr) {
+      res.write(
+        `<pre style='color:red'>Browser launch failed: ${browserErr.message}</pre>`
+      );
+      res.write("<h2>Recommended Solution</h2>");
+      res.write(`<pre>
+1. SSH into your server
+2. Run: sudo apt-get update
+3. Run: sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libnss3 libx11-xcb1 libxss1
+4. Restart the application: pm2 restart whatsapp
+</pre>`);
+      res.end();
+    }
+  } catch (err) {
+    res.status(500).send(`System check error: ${err.message}`);
   }
 });
 
