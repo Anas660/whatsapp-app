@@ -66,8 +66,8 @@ app.post("/create-client", async (req, res) => {
 });
 
 // Endpoint to get QR for a specific client
-app.get("/qr/:clientId?", async (req, res) => {
-  const clientId = req.params.clientId || defaultClientId;
+app.get("/qr", async (req, res) => {
+  const clientId = req.query.clientId || defaultClientId;
 
   if (!clients[clientId]) {
     return res.status(404).json({ error: `Client ${clientId} not found` });
@@ -260,6 +260,15 @@ app.get("/", (req, res) => {
           <code>POST /create-client</code> - Create a new client<br>
           <code>GET /qr/:clientId?</code> - Get QR code for connection<br>
         </div>
+
+        <div class="endpoint">
+          <h3>Connection Management</h3>
+          <code>GET /status?clientId=default</code> - Check connection status<br>
+          <code>POST /logout?clientId=default</code> - Logout from WhatsApp<br>
+          <code>POST /reconnect?clientId=default</code> - Force reconnection<br>
+          <code>POST /create-client</code> - Create a new client<br>
+          <code>GET /qr?clientId=default</code> - Get QR code for connection<br>
+        </div>
         
         <script>
           document.getElementById('createClient').addEventListener('submit', function(e) {
@@ -275,7 +284,7 @@ app.get("/", (req, res) => {
             .then(data => {
               if (data.success) {
                 alert('Client created! Redirecting to QR code page...');
-                window.location.href = '/qr/' + clientId;
+                window.location.href = '/qr?clientId=' + clientId;
               } else {
                 alert('Error: ' + data.error);
               }
@@ -415,8 +424,8 @@ app.get("/chat-info/:number", async (req, res) => {
 });
 
 // Status endpoint
-app.get("/status/:clientId?", async (req, res) => {
-  const clientId = req.params.clientId || defaultClientId;
+app.get("/status", async (req, res) => {
+  const clientId = req.query.clientId || defaultClientId;
 
   if (!clients[clientId]) {
     return res.status(404).json({ error: `Client ${clientId} not found` });
@@ -439,8 +448,8 @@ app.get("/status/:clientId?", async (req, res) => {
 });
 
 // Logout endpoint
-app.post("/logout/:clientId?", async (req, res) => {
-  const clientId = req.params.clientId || defaultClientId;
+app.post("/logout", async (req, res) => {
+  const clientId = req.query.clientId || defaultClientId;
 
   if (!clients[clientId]) {
     return res.status(404).json({ error: `Client ${clientId} not found` });
@@ -468,8 +477,8 @@ app.post("/logout/:clientId?", async (req, res) => {
 });
 
 // Reconnect endpoint
-app.post("/reconnect/:clientId?", async (req, res) => {
-  const clientId = req.params.clientId || defaultClientId;
+app.post("/reconnect", async (req, res) => {
+  const clientId = req.query.clientId || defaultClientId;
 
   if (!clients[clientId]) {
     return res.status(404).json({ error: `Client ${clientId} not found` });
@@ -492,7 +501,7 @@ app.post("/reconnect/:clientId?", async (req, res) => {
 
     res.json({
       success: true,
-      message: `Reconnecting WhatsApp client ${clientId}. Use /qr/${clientId} to scan the QR code.`,
+      message: `Reconnecting WhatsApp client ${clientId}. Use /qr?clientId=${clientId} to scan the QR code.`,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
