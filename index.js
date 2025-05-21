@@ -42,15 +42,23 @@ app.get("/qr", async (req, res) => {
 // API endpoint to send a message
 app.post("/send-message", async (req, res) => {
   const { number, message, pdfUrl } = req.body;
+
   if (!number || (!message && !pdfUrl)) {
     return res
       .status(400)
       .json({ error: "number and message or pdfUrl are required" });
   }
+
+  if (!client || !client.info) {
+    return res.status(503).json({
+      error: "WhatsApp client not connected",
+      message: "Please connect WhatsApp first using the QR code",
+    });
+  }
+
   try {
     const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
     if (pdfUrl) {
-      // Download PDF and send as media
       const media = await MessageMedia.fromUrl(pdfUrl, { unsafeMime: true });
       await client.sendMessage(chatId, media, { caption: message || "" });
     } else {
@@ -58,6 +66,7 @@ app.post("/send-message", async (req, res) => {
     }
     res.json({ success: true });
   } catch (err) {
+    console.error("Send message error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -73,22 +82,61 @@ app.get("/status", (req, res) => {
 // Logout from WhatsApp
 app.post("/logout", async (req, res) => {
   try {
-    await client.logout();
+    if (!client || !client.pupPage) {
+      return res.json({ success: true, message: "Already disconnected" });
+    }
+
+    try {
+      await client.logout().catch((err) => {
+        console.log("Logout error handled:", err.message);
+      });
+    } catch (error) {
+      console.error("Error during logout:", error);
+      // Continue execution even if logout fails
+    }
+
     res.json({ success: true, message: "Logged out successfully" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Logout endpoint error:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to logout safely", details: err.message });
   }
 });
 
 // Force reconnection
 app.post("/reconnect", async (req, res) => {
   try {
-    await client.destroy();
+    // Safely destroy the client if it exists
+    if (client) {
+      try {
+        if (client.pupPage) {
+          await client.destroy().catch((err) => {
+            console.log("Client destroy error handled:", err.message);
+          });
+        }
+      } catch (error) {
+        console.error("Error during client destroy:", error);
+        // Continue execution even if destroy fails
+      }
+    }
+
+    // Reset QR code
     latestQR = null;
-    client.initialize();
+
+    // Initialize a new client
+    setTimeout(() => {
+      client.initialize().catch((err) => {
+        console.error("Client initialization error:", err);
+      });
+    }, 1000);
+
     res.json({ success: true, message: "Reconnecting WhatsApp..." });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Reconnect endpoint error:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to reconnect", details: err.message });
   }
 });
 
