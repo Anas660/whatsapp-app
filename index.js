@@ -398,7 +398,6 @@ app.get("/qr", async (req, res) => {
     <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
   `);
 });
-
 // Update the send-message endpoint to work with multiple clients
 app.post("/send-message", async (req, res) => {
   const { number, message, pdfUrl, clientId = defaultClientId } = req.body;
@@ -417,25 +416,70 @@ app.post("/send-message", async (req, res) => {
 
   const client = clients[clientId].client;
 
-  if (!client || !client.info) {
+  // Enhanced connection check
+  if (!client) {
+    return res.status(503).json({
+      error: "WhatsApp client not initialized",
+      message: `Client ${clientId} needs to be initialized. Please create it first.`,
+    });
+  }
+
+  // Check if client has info (is authenticated)
+  if (!client.info) {
     return res.status(503).json({
       error: "WhatsApp client not connected",
-      message: `Please connect WhatsApp client ${clientId} first using the QR code`,
+      message: `Please connect WhatsApp client ${clientId} first using the QR code at /qr?clientId=${clientId}`,
+    });
+  }
+
+  // Check if the puppeteer page is still active
+  if (!client.pupPage || client.pupPage.isClosed()) {
+    return res.status(503).json({
+      error: "WhatsApp client session expired",
+      message: `The browser session has closed. Please reconnect at /reconnect?clientId=${clientId}`,
     });
   }
 
   try {
+    // Verify client state before sending
+    const state = await client.getState();
+    if (state !== "CONNECTED") {
+      return res.status(503).json({
+        error: "WhatsApp client not in CONNECTED state",
+        message: `Current state: ${state}. Please reconnect the client.`,
+        currentState: state,
+      });
+    }
+
     const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
+
     if (pdfUrl) {
       const media = await MessageMedia.fromUrl(pdfUrl, { unsafeMime: true });
       await client.sendMessage(chatId, media, { caption: message || "" });
     } else {
       await client.sendMessage(chatId, message);
     }
-    res.json({ success: true });
+
+    res.json({ success: true, message: "Message sent successfully" });
   } catch (err) {
-    console.error("Send message error:", err);
-    res.status(500).json({ error: err.message });
+    console.error(`Send message error for client ${clientId}:`, err);
+
+    // Check if it's a connection error
+    if (
+      err.message.includes("Evaluation failed") ||
+      err.message.includes("Protocol error")
+    ) {
+      return res.status(503).json({
+        error: "WhatsApp client connection lost",
+        message: `The client appears to have disconnected. Please reconnect at /reconnect?clientId=${clientId}`,
+        details: err.message,
+      });
+    }
+
+    res.status(500).json({
+      error: err.message,
+      details: "Failed to send message. The client may need to be reconnected.",
+    });
   }
 });
 
@@ -586,7 +630,6 @@ app.get("/", (req, res) => {
       </html>
     `);
 });
-// Add these endpoints after your existing ones
 
 // Send to multiple recipients at once
 app.post("/broadcast", async (req, res) => {
@@ -615,7 +658,24 @@ app.post("/broadcast", async (req, res) => {
     });
   }
 
+  // Check if the puppeteer page is still active
+  if (!client.pupPage || client.pupPage.isClosed()) {
+    return res.status(503).json({
+      error: "WhatsApp client session expired",
+      message: `The browser session has closed. Please reconnect at /reconnect?clientId=${clientId}`,
+    });
+  }
+
   try {
+    // Verify client state
+    const state = await client.getState();
+    if (state !== "CONNECTED") {
+      return res.status(503).json({
+        error: "WhatsApp client not in CONNECTED state",
+        message: `Current state: ${state}. Please reconnect the client.`,
+      });
+    }
+
     const results = [];
     let media = null;
 
@@ -641,10 +701,14 @@ app.post("/broadcast", async (req, res) => {
 
     res.json({ success: true, results });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error(`Broadcast error for client ${clientId}:`, err);
+    res.status(500).json({
+      error: err.message,
+      message:
+        "Failed to broadcast messages. The client may need to be reconnected.",
+    });
   }
 });
-
 // Send an image with a message
 app.post("/send-image", async (req, res) => {
   const { number, caption, imageUrl, clientId = defaultClientId } = req.body;
@@ -799,8 +863,8 @@ app.post("/reconnect", async (req, res) => {
 });
 
 //delete client endpoint
-
-app.delete("/delete-client/:clientId", (req, res) => {
+//delete client endpoint
+app.delete("/delete-client/:clientId", async (req, res) => {
   const { clientId } = req.params;
 
   if (!clients[clientId]) {
@@ -809,10 +873,34 @@ app.delete("/delete-client/:clientId", (req, res) => {
     });
   }
 
-  // Delete the client from the clients object
-  delete clients[clientId];
+  try {
+    const client = clients[clientId].client;
 
-  res.json({ success: true, message: `Client ${clientId} deleted` });
+    // Properly destroy the client if it exists
+    if (client) {
+      try {
+        await client.destroy();
+        console.log(`Client ${clientId} destroyed successfully`);
+      } catch (err) {
+        console.log(`Error destroying client ${clientId}:`, err.message);
+        // Continue with deletion even if destroy fails
+      }
+    }
+
+    // Delete the client from the clients object
+    delete clients[clientId];
+
+    res.json({
+      success: true,
+      message: `Client ${clientId} deleted successfully`,
+    });
+  } catch (err) {
+    console.error(`Error deleting client ${clientId}:`, err);
+    res.status(500).json({
+      error: "Failed to delete client",
+      message: err.message,
+    });
+  }
 });
 
 // Add a diagnostic endpoint
