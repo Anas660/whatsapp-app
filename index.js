@@ -977,53 +977,6 @@ app.post("/reconnect", async (req, res) => {
   }
 });
 
-// Delete client endpoint
-app.delete("/delete-client", async (req, res) => {
-  try {
-    const { clientId } = req.body;
-
-    if (!clientId) {
-      return res.status(400).json({ error: "clientId is required" });
-    }
-
-    // Prevent deleting the default client
-    if (clientId === defaultClientId) {
-      return res.status(400).json({
-        error: "Cannot delete the default client",
-        message: "The default client cannot be deleted for system stability",
-      });
-    }
-
-    if (!clients[clientId]) {
-      return res.status(404).json({ error: `Client ${clientId} not found` });
-    }
-
-    const client = clients[clientId].client;
-
-    // Destroy the client and cleanup
-    try {
-      if (client) {
-        await client.logout();
-        await client.destroy();
-        console.log(`Client ${clientId} destroyed successfully`);
-      }
-    } catch (err) {
-      console.warn(`Error during client ${clientId} cleanup:`, err.message);
-    }
-
-    // Remove from clients object
-    delete clients[clientId];
-
-    res.json({
-      success: true,
-      message: `Client ${clientId} deleted successfully`,
-    });
-  } catch (err) {
-    console.error("Delete client error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Add a diagnostic endpoint
 app.get("/system-check", async (req, res) => {
   try {
