@@ -6,34 +6,8 @@ const QRCode = require("qrcode");
 const app = express();
 const port = process.env.PORT || 3000;
 
-// API Key for security - Change this to a strong random string
-const API_KEY = process.env.API_KEY || "your-secret-api-key-change-me";
-
 app.use(cors());
 app.use(express.json());
-
-// Middleware for API key authentication
-const authenticateApiKey = (req, res, next) => {
-  // Skip authentication for GET / (homepage) and /qr (for scanning)
-  if (req.path === "/" || req.path === "/qr") {
-    return next();
-  }
-
-  const apiKey = req.headers["x-api-key"] || req.query.apiKey;
-
-  if (!apiKey || apiKey !== API_KEY) {
-    return res.status(401).json({
-      error: "Unauthorized",
-      message:
-        "Valid API key required. Include it in the 'x-api-key' header or 'apiKey' query parameter.",
-    });
-  }
-
-  next();
-};
-
-// Apply authentication middleware to all routes
-app.use(authenticateApiKey);
 
 // Add this near the top of your file, after imports
 const clients = {};
@@ -190,82 +164,10 @@ app.post("/create-client", async (req, res) => {
   }
 });
 
-// Delete client endpoint
-app.delete("/delete-client", async (req, res) => {
-  try {
-    const { clientId } = req.body;
-
-    if (!clientId) {
-      return res.status(400).json({ error: "clientId is required" });
-    }
-
-    // Prevent deleting the default client
-    if (clientId === defaultClientId) {
-      return res.status(400).json({
-        error: "Cannot delete the default client",
-        message: "The default client cannot be deleted for system stability",
-      });
-    }
-
-    if (!clients[clientId]) {
-      return res.status(404).json({ error: `Client ${clientId} not found` });
-    }
-
-    const client = clients[clientId].client;
-
-    // Destroy the client and cleanup
-    try {
-      if (client) {
-        await client.logout();
-        await client.destroy();
-        console.log(`Client ${clientId} destroyed successfully`);
-      }
-    } catch (err) {
-      console.warn(`Error during client ${clientId} cleanup:`, err.message);
-    }
-
-    // Remove from clients object
-    delete clients[clientId];
-
-    res.json({
-      success: true,
-      message: `Client ${clientId} deleted successfully`,
-    });
-  } catch (err) {
-    console.error("Delete client error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// List all clients endpoint
-app.get("/list-clients", async (req, res) => {
-  try {
-    const clientsList = Object.keys(clients).map((id) => {
-      const client = clients[id].client;
-      return {
-        id,
-        connected: client && client.info ? true : false,
-        name: client && client.info ? client.info.pushname : null,
-        phone: client && client.info ? client.info.wid.user : null,
-        isDefault: id === defaultClientId,
-      };
-    });
-
-    res.json({
-      success: true,
-      clients: clientsList,
-      total: clientsList.length,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Update the QR endpoint with better monitoring
 app.get("/qr", async (req, res) => {
   const clientId = req.query.clientId || defaultClientId;
   const forceRefresh = req.query.refresh === "true";
-  const apiKey = req.query.apiKey;
 
   if (!clients[clientId]) {
     return res.status(404).json({ error: `Client ${clientId} not found` });
@@ -322,9 +224,7 @@ app.get("/qr", async (req, res) => {
           <h2>QR Code Generated for Client ${clientId}</h2>
           <img src="${qrImage}" />
           <p>Generated at: ${new Date().toLocaleString()}</p>
-          <p>If the QR code doesn't work, <a href="/qr?clientId=${clientId}&refresh=true${
-          apiKey ? "&apiKey=" + apiKey : ""
-        }">click here to generate a new one</a>.</p>
+          <p>If the QR code doesn't work, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
         `);
         return;
       } else {
@@ -333,9 +233,7 @@ app.get("/qr", async (req, res) => {
           <p>Please wait a moment...</p>
           <p>Debug: QR event didn't fire within timeout period.</p>
           <script>
-            setTimeout(() => window.location.href = '/qr?clientId=${clientId}${
-          apiKey ? "&apiKey=" + apiKey : ""
-        }', 5000);
+            setTimeout(() => window.location.href = '/qr?clientId=${clientId}', 5000);
           </script>
         `);
         return;
@@ -345,9 +243,7 @@ app.get("/qr", async (req, res) => {
       res.send(`
         <h2>Error Refreshing Client ${clientId}</h2>
         <p>Error: ${err.message}</p>
-        <p><a href="/qr?clientId=${clientId}&refresh=true${
-        apiKey ? "&apiKey=" + apiKey : ""
-      }">Try again</a></p>
+        <p><a href="/qr?clientId=${clientId}&refresh=true">Try again</a></p>
       `);
       return;
     }
@@ -408,9 +304,7 @@ app.get("/qr", async (req, res) => {
               <p>Generated at: ${new Date(
                 clientData.qrData.timestamp
               ).toLocaleString()}</p>
-              <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true${
-              apiKey ? "&apiKey=" + apiKey : ""
-            }">click here to generate a new one</a>.</p>
+              <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
             `);
           }
         } catch (err) {
@@ -430,9 +324,7 @@ app.get("/qr", async (req, res) => {
               <li>Check if WhatsApp Web is accessible in your browser</li>
             </ul>
             
-            <p><a href="/qr?clientId=${clientId}&refresh=true${
-            apiKey ? "&apiKey=" + apiKey : ""
-          }">Try Again</a></p>
+            <p><a href="/qr?clientId=${clientId}&refresh=true">Try Again</a></p>
           `);
         }
       }
@@ -446,9 +338,7 @@ app.get("/qr", async (req, res) => {
           <p>Generated at: ${new Date(
             clientData.qrData.timestamp
           ).toLocaleString()}</p>
-          <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true${
-          apiKey ? "&apiKey=" + apiKey : ""
-        }">click here to generate a new one</a>.</p>
+          <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
         `);
       }
 
@@ -459,9 +349,7 @@ app.get("/qr", async (req, res) => {
         <p>Connection details: Connected=${isConnected}, Browser=${
         hasPupPage ? "Active" : "Not Active"
       }</p>
-        <p><a href="/qr?clientId=${clientId}&refresh=true${
-        apiKey ? "&apiKey=" + apiKey : ""
-      }">Force refresh QR code</a></p>
+        <p><a href="/qr?clientId=${clientId}&refresh=true">Force refresh QR code</a></p>
         <script>setTimeout(() => window.location.reload(), 3000);</script>
       `);
     } catch (err) {
@@ -470,9 +358,7 @@ app.get("/qr", async (req, res) => {
         <h2>WhatsApp Initialization Error</h2>
         <p>There was an error initializing the WhatsApp client:</p>
         <pre>${err.message}</pre>
-        <p><a href="/qr?clientId=${clientId}&refresh=true${
-        apiKey ? "&apiKey=" + apiKey : ""
-      }">Try again</a></p>
+        <p><a href="/qr?clientId=${clientId}&refresh=true">Try again</a></p>
       `);
     }
   }
@@ -483,11 +369,7 @@ app.get("/qr", async (req, res) => {
       <h2>WhatsApp client ${clientId} is connected</h2>
       <p>Connected as: ${client.info.pushname} (${client.info.wid.user})</p>
       <p>If you want to reconnect with a different account, first logout:</p>
-      <p><a href="/logout?clientId=${clientId}${
-      apiKey ? "&apiKey=" + apiKey : ""
-    }">Logout</a> | <a href="/qr?clientId=${clientId}&refresh=true${
-      apiKey ? "&apiKey=" + apiKey : ""
-    }">Force new QR Code</a></p>
+      <p><a href="/logout?clientId=${clientId}">Logout</a> | <a href="/qr?clientId=${clientId}&refresh=true">Force new QR Code</a></p>
     `);
   }
 
@@ -499,9 +381,7 @@ app.get("/qr", async (req, res) => {
       hasPupPage ? "Active" : "Not Active"
     }</p>
       <p>The system hasn't generated a QR code yet.</p>
-      <p><a href="/qr?clientId=${clientId}&refresh=true${
-      apiKey ? "&apiKey=" + apiKey : ""
-    }">Force refresh QR code</a></p>
+      <p><a href="/qr?clientId=${clientId}&refresh=true">Force refresh QR code</a></p>
       <script>setTimeout(() => window.location.reload(), 3000);</script>
     `);
   }
@@ -515,9 +395,7 @@ app.get("/qr", async (req, res) => {
     <p>Generated at: ${new Date(
       clientData.qrData.timestamp
     ).toLocaleString()}</p>
-    <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true${
-    apiKey ? "&apiKey=" + apiKey : ""
-  }">click here to generate a new one</a>.</p>
+    <p>If the QR code has expired, <a href="/qr?clientId=${clientId}&refresh=true">click here to generate a new one</a>.</p>
   `);
 });
 
@@ -569,7 +447,6 @@ app.get("/", (req, res) => {
       id,
       connected: client && client.info ? true : false,
       name: client && client.info ? client.info.pushname : null,
-      isDefault: id === defaultClientId,
     };
   });
 
@@ -579,38 +456,24 @@ app.get("/", (req, res) => {
       <head>
         <title>WhatsApp API for Laravel CMS</title>
         <style>
-          body { font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; }
+          body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
           code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; }
           pre { background: #f4f4f4; padding: 10px; border-radius: 3px; overflow-x: auto; }
           .endpoint { margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
           .client-card { border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; border-radius: 4px; }
           .connected { color: green; }
           .disconnected { color: red; }
-          .security-notice { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 4px; margin-bottom: 20px; }
           h3 { color: #333; }
           table { border-collapse: collapse; width: 100%; }
           th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
           tr:hover { background-color: #f5f5f5; }
-          .delete-btn { color: red; cursor: pointer; }
-          input[type="text"], input[type="password"] { padding: 8px; margin: 5px; border: 1px solid #ddd; border-radius: 4px; }
-          button { padding: 8px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-          button:hover { background: #0056b3; }
-          .danger-btn { background: #dc3545; }
-          .danger-btn:hover { background: #c82333; }
         </style>
       </head>
       <body>
         <h1>WhatsApp API for Laravel CMS</h1>
         
-        <div class="security-notice">
-          <strong>🔒 Security Notice:</strong> This API is protected with API key authentication. 
-          Include the API key in the <code>x-api-key</code> header or <code>apiKey</code> query parameter for all requests.
-          <br><strong>Current API Key:</strong> <code>${API_KEY}</code>
-          <br><small>Change this in your environment variables (API_KEY) for production use.</small>
-        </div>
-        
         <h2>Clients</h2>
-        <table id="clientsTable">
+        <table>
           <tr>
             <th>Client ID</th>
             <th>Status</th>
@@ -619,10 +482,8 @@ app.get("/", (req, res) => {
           ${clientsList
             .map(
               (client) => `
-            <tr data-client-id="${client.id}">
-              <td>${client.id}${
-                client.isDefault ? " <strong>(Default)</strong>" : ""
-              }</td>
+            <tr>
+              <td>${client.id}</td>
               <td class="${client.connected ? "connected" : "disconnected"}">
                 ${
                   client.connected
@@ -632,14 +493,7 @@ app.get("/", (req, res) => {
               </td>
               <td>
                 <a href="/qr?clientId=${client.id}">QR Code</a> | 
-                <a href="/status?clientId=${
-                  client.id
-                }&apiKey=${API_KEY}">Status</a>
-                ${
-                  !client.isDefault
-                    ? ` | <span class="delete-btn" onclick="deleteClient('${client.id}')">Delete</span>`
-                    : ""
-                }
+                <a href="/status?clientId=${client.id}">Status</a>
               </td>
             </tr>
           `
@@ -650,20 +504,10 @@ app.get("/", (req, res) => {
         <h3>Create New Client</h3>
         <form id="createClient" style="margin-bottom: 20px;">
           <input type="text" id="newClientId" placeholder="Enter client ID" required>
-          <input type="password" id="apiKeyInput" placeholder="API Key" value="${API_KEY}" required>
           <button type="submit">Create Client</button>
         </form>
         
         <h2>API Endpoints</h2>
-        
-        <div class="endpoint">
-          <h3>Authentication</h3>
-          <p>All API endpoints (except <code>/</code> and <code>/qr</code>) require authentication.</p>
-          <p>Include API key in headers:</p>
-          <pre>x-api-key: ${API_KEY}</pre>
-          <p>Or as query parameter:</p>
-          <pre>?apiKey=${API_KEY}</pre>
-        </div>
         
         <div class="endpoint">
           <h3>Send Message</h3>
@@ -699,13 +543,20 @@ app.get("/", (req, res) => {
         </div>
   
         <div class="endpoint">
-          <h3>Client Management</h3>
+          <h3>Connection Management</h3>
+          <code>GET /status/:clientId?</code> - Check connection status<br>
+          <code>POST /logout/:clientId?</code> - Logout from WhatsApp<br>
+          <code>POST /reconnect/:clientId?</code> - Force reconnection<br>
           <code>POST /create-client</code> - Create a new client<br>
-          <code>DELETE /delete-client</code> - Delete a client (body: {"clientId": "id"})<br>
-          <code>GET /list-clients</code> - List all clients<br>
+          <code>GET /qr/:clientId?</code> - Get QR code for connection<br>
+        </div>
+
+        <div class="endpoint">
+          <h3>Connection Management</h3>
           <code>GET /status?clientId=default</code> - Check connection status<br>
           <code>POST /logout?clientId=default</code> - Logout from WhatsApp<br>
           <code>POST /reconnect?clientId=default</code> - Force reconnection<br>
+          <code>POST /create-client</code> - Create a new client<br>
           <code>GET /qr?clientId=default</code> - Get QR code for connection<br>
         </div>
         
@@ -713,59 +564,29 @@ app.get("/", (req, res) => {
           document.getElementById('createClient').addEventListener('submit', function(e) {
             e.preventDefault();
             const clientId = document.getElementById('newClientId').value;
-            const apiKey = document.getElementById('apiKeyInput').value;
             
             fetch('/create-client', {
               method: 'POST',
-              headers: { 
-                'Content-Type': 'application/json',
-                'x-api-key': apiKey
-              },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ clientId })
             })
             .then(response => response.json())
             .then(data => {
               if (data.success) {
                 alert('Client created! Redirecting to QR code page...');
-                window.location.href = '/qr?clientId=' + clientId + '&apiKey=' + apiKey;
+                window.location.href = '/qr?clientId=' + clientId;
               } else {
                 alert('Error: ' + data.error);
               }
             })
             .catch(err => alert('Error: ' + err));
           });
-          
-          function deleteClient(clientId) {
-            if (!confirm('Are you sure you want to delete client "' + clientId + '"? This will remove all session data.')) {
-              return;
-            }
-            
-            const apiKey = document.getElementById('apiKeyInput').value || '${API_KEY}';
-            
-            fetch('/delete-client', {
-              method: 'DELETE',
-              headers: { 
-                'Content-Type': 'application/json',
-                'x-api-key': apiKey
-              },
-              body: JSON.stringify({ clientId })
-            })
-            .then(response => response.json())
-            .then(data => {
-              if (data.success) {
-                alert('Client deleted successfully!');
-                window.location.reload();
-              } else {
-                alert('Error: ' + data.error);
-              }
-            })
-            .catch(err => alert('Error: ' + err));
-          }
         </script>
       </body>
       </html>
     `);
 });
+// Add these endpoints after your existing ones
 
 // Send to multiple recipients at once
 app.post("/broadcast", async (req, res) => {
@@ -1048,8 +869,4 @@ app.get("/system-check", async (req, res) => {
 
 app.listen(port, () => {
   console.log(`API server running on http://localhost:${port}`);
-  console.log(`API Key: ${API_KEY}`);
-  console.log(
-    `⚠️  Remember to set a strong API_KEY in your environment variables for production!`
-  );
 });
