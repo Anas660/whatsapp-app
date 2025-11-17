@@ -798,6 +798,23 @@ app.post("/reconnect", async (req, res) => {
   }
 });
 
+//delete client endpoint
+
+app.delete("/delete-client/:clientId", (req, res) => {
+  const { clientId } = req.params;
+
+  if (!clients[clientId]) {
+    return res.status(404).json({
+      error: `Client ${clientId} not found`,
+    });
+  }
+
+  // Delete the client from the clients object
+  delete clients[clientId];
+
+  res.json({ success: true, message: `Client ${clientId} deleted` });
+});
+
 // Add a diagnostic endpoint
 app.get("/system-check", async (req, res) => {
   try {
