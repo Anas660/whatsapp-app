@@ -2,6 +2,7 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const express = require("express");
 const cors = require("cors");
 const QRCode = require("qrcode");
+const path = require("path");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -18,8 +19,12 @@ function createWhatsAppClient(clientId) {
   console.log(`Creating new WhatsApp client: ${clientId}`);
 
   const newClient = new Client({
-    authStrategy: new LocalAuth({ clientId: clientId }),
+    authStrategy: new LocalAuth({
+      clientId,
+      dataPath: path.join(__dirname, "auth-data"), // ensure persistent
+    }),
     puppeteer: {
+      headless: "new",
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -30,15 +35,30 @@ function createWhatsAppClient(clientId) {
         "--disable-gpu",
         "--disable-extensions",
       ],
-      headless: "new", // Use the new headless mode
-      timeout: 60000, // Increase timeout to 1 minute
     },
   });
 
+  // Prevent double initialization
+  let initInProgress = false;
+  newClient.safeInitialize = async () => {
+    if (initInProgress) {
+      console.log(`Initialization already in progress for ${clientId}`);
+      return;
+    }
+    initInProgress = true;
+    try {
+      await newClient.initialize();
+    } finally {
+      initInProgress = false;
+    }
+  };
+
   const qrData = { qr: null, timestamp: null };
 
-  // Add more detailed event handlers with debug logging
+  let lastQRValue = null;
   newClient.on("qr", (qr) => {
+    if (qr === lastQRValue) return; // debounce duplicate qr
+    lastQRValue = qr;
     console.log(
       `QR Code generated for client ${clientId} at ${new Date().toLocaleString()}`
     );
@@ -46,10 +66,16 @@ function createWhatsAppClient(clientId) {
     qrData.timestamp = Date.now();
   });
 
+  let readyOnce = false;
   newClient.on("ready", () => {
-    console.log(
-      `WhatsApp client ${clientId} is ready at ${new Date().toLocaleString()}`
-    );
+    if (!readyOnce) {
+      console.log(
+        `WhatsApp client ${clientId} is ready at ${new Date().toLocaleString()}`
+      );
+      readyOnce = true;
+    } else {
+      console.log(`Ready event (duplicate) suppressed for ${clientId}`);
+    }
     qrData.qr = null;
   });
 
@@ -57,82 +83,57 @@ function createWhatsAppClient(clientId) {
     console.log(
       `WhatsApp client ${clientId} authenticated at ${new Date().toLocaleString()}`
     );
+    // If authenticated, clear any QR still showing
+    qrData.qr = null;
   });
 
   newClient.on("disconnected", (reason) => {
-    console.log(
-      `WhatsApp client ${clientId} disconnected. Reason: ${reason || "Unknown"}`
-    );
+    console.log(`Client ${clientId} disconnected. Reason: ${reason}`);
+    if (reason === "LOGOUT") {
+      // Delay recreating to avoid rapid logout loops
+      setTimeout(() => {
+        console.log(`Recreating client after LOGOUT: ${clientId}`);
+        clients[clientId] = createWhatsAppClient(clientId);
+        clients[clientId].client
+          .safeInitialize()
+          .catch((e) => console.error(e));
+        setupConnectionMonitoring(clientId);
+      }, 10000);
+    }
+  });
+
+  newClient.on("change_state", (state) => {
+    console.log(`State change for ${clientId}: ${state}`);
   });
 
   newClient.on("auth_failure", (msg) => {
-    console.error(`Authentication failure for client ${clientId}:`, msg);
+    console.error(`Auth failure for ${clientId}:`, msg);
   });
 
-  // Add debugging for critical events
-  newClient.on("loading_screen", (percent, message) => {
-    console.log(`WhatsApp loading (${clientId}): ${percent}% - ${message}`);
-  });
-
-  // Log all browser console messages
-  newClient.on("message_create", (msg) => {
+  newClient.on("message_create", () => {
     console.log(`New message event for ${clientId}`);
   });
 
-  const initializeWithRetry = async () => {
-    let initializationAttempts = 0;
-    const MAX_INIT_ATTEMPTS = 3;
-
-    const tryInit = async () => {
-      if (initializationAttempts >= MAX_INIT_ATTEMPTS) {
-        console.error(
-          `Max initialization attempts reached for client ${clientId}`
-        );
-        return false;
-      }
-
-      initializationAttempts++;
-      console.log(
-        `Initialization attempt ${initializationAttempts} for client ${clientId}`
-      );
-
-      try {
-        console.log(`Starting initialization for ${clientId}...`);
-        await newClient.initialize();
-        console.log(`Client ${clientId} successfully initialized`);
-        return true;
-      } catch (err) {
-        console.error(
-          `Failed to initialize client ${clientId} (attempt ${initializationAttempts}):`,
-          err
-        );
-
-        if (initializationAttempts < MAX_INIT_ATTEMPTS) {
-          console.log(`Will retry in 5 seconds...`);
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-          return tryInit();
-        }
-        return false;
-      }
-    };
-
-    return tryInit();
-  };
+  newClient.on("error", (err) => {
+    console.error(`Client error (${clientId}):`, err.message);
+  });
 
   return {
     client: newClient,
     qrData,
-    initializeWithRetry,
   };
 }
 
 // Initialize the default client with retry capabilities
 clients[defaultClientId] = createWhatsAppClient(defaultClientId);
-clients[defaultClientId].initializeWithRetry().then(() => {
-  setupConnectionMonitoring(defaultClientId);
-}).catch((err) => {
-  console.error("Failed to initialize default client:", err);
-});
+clients[defaultClientId]
+  .initializeWithRetry()
+  .then(() => {
+    setupConnectionMonitoring(defaultClientId);
+  })
+  .catch((err) => {
+    console.error("Failed to initialize default client:", err);
+  });
 
 // Create endpoint to generate a new client
 app.post("/create-client", async (req, res) => {
@@ -638,10 +639,18 @@ app.get("/", (req, res) => {
 
 // Send to multiple recipients at once
 app.post("/broadcast", async (req, res) => {
-  const { numbers, message, pdfUrl, clientId = defaultClientId, delayMs = 2000 } = req.body;
+  const {
+    numbers,
+    message,
+    pdfUrl,
+    clientId = defaultClientId,
+    delayMs = 2000,
+  } = req.body;
 
   if (!numbers || !Array.isArray(numbers) || numbers.length === 0) {
-    return res.status(400).json({ error: "Valid array of numbers is required" });
+    return res
+      .status(400)
+      .json({ error: "Valid array of numbers is required" });
   }
 
   if (!message && !pdfUrl) {
@@ -689,7 +698,7 @@ app.post("/broadcast", async (req, res) => {
     // Send messages with delay to avoid spam detection
     for (let i = 0; i < numbers.length; i++) {
       const number = numbers[i];
-      
+
       try {
         // Re-check connection state before each message
         const currentState = await client.getState();
@@ -710,18 +719,21 @@ app.post("/broadcast", async (req, res) => {
 
         // Add delay between messages (except after the last one)
         if (i < numbers.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, delayMs));
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
       } catch (err) {
         console.error(`Failed to send to ${number}:`, err.message);
         results.push({ number, success: false, error: err.message });
-        
+
         // If connection lost, stop the broadcast
-        if (err.message.includes('disconnected') || err.message.includes('Protocol error')) {
+        if (
+          err.message.includes("disconnected") ||
+          err.message.includes("Protocol error")
+        ) {
           return res.status(503).json({
             error: "Connection lost during broadcast",
             message: "Please reconnect the client",
-            results: results
+            results: results,
           });
         }
       }
@@ -732,7 +744,8 @@ app.post("/broadcast", async (req, res) => {
     console.error(`Broadcast error for client ${clientId}:`, err);
     res.status(500).json({
       error: err.message,
-      message: "Failed to broadcast messages. The client may need to be reconnected.",
+      message:
+        "Failed to broadcast messages. The client may need to be reconnected.",
     });
   }
 });
@@ -813,7 +826,7 @@ app.get("/status", async (req, res) => {
   }
 
   const client = clients[clientId].client;
-  
+
   try {
     // Check actual connection state, not just client.info
     const state = await client.getState();
@@ -824,12 +837,13 @@ app.get("/status", async (req, res) => {
       client: clientId,
       connected: isConnected,
       state: state,
-      info: isConnected && client.info
-        ? {
-            name: client.info.pushname,
-            phone: client.info.wid.user,
-          }
-        : null,
+      info:
+        isConnected && client.info
+          ? {
+              name: client.info.pushname,
+              phone: client.info.wid.user,
+            }
+          : null,
     });
   } catch (err) {
     res.json({
@@ -1021,11 +1035,11 @@ app.listen(port, () => {
 // Function to setup connection monitoring for a client
 function setupConnectionMonitoring(clientId) {
   const client = clients[clientId].client;
-  
+
   // Monitor disconnection and auto-reconnect
-  client.on('disconnected', async (reason) => {
+  client.on("disconnected", async (reason) => {
     console.log(`Client ${clientId} disconnected: ${reason}`);
-    
+
     // Auto-reconnect after 5 seconds
     setTimeout(async () => {
       console.log(`Attempting to reconnect client ${clientId}...`);
@@ -1040,13 +1054,13 @@ function setupConnectionMonitoring(clientId) {
   });
 
   // Monitor authentication failures
-  client.on('auth_failure', async () => {
+  client.on("auth_failure", async () => {
     console.error(`Auth failure for ${clientId}, clearing session...`);
     delete clients[clientId];
   });
 
   // Add change_state monitoring
-  client.on('change_state', state => {
+  client.on("change_state", (state) => {
     console.log(`Client ${clientId} state changed to: ${state}`);
   });
 }
