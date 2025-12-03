@@ -10,10 +10,267 @@ const port = process.env.PORT || 3000;
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // For form data
 
 // Store multiple WhatsApp clients
 const clients = {};
 const defaultClientId = "default";
+
+// ============================================
+// AUTHENTICATION CONFIGURATION
+// ============================================
+const AUTH_USERNAME = process.env.AUTH_USERNAME || "admin";
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || "whatsapp2024"; // CHANGE THIS!
+const SESSION_SECRET =
+  process.env.SESSION_SECRET || "your-secret-key-change-this";
+
+// Simple session storage (in production, use Redis or database)
+const sessions = new Map();
+
+/**
+ * Generate a simple session token
+ */
+function generateSessionToken() {
+  return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
+
+/**
+ * Authentication middleware
+ */
+function requireAuth(req, res, next) {
+  const token =
+    req.headers.authorization?.replace("Bearer ", "") ||
+    req.query.token ||
+    req.cookies?.session_token;
+
+  if (token && sessions.has(token)) {
+    const session = sessions.get(token);
+
+    // Check if session is still valid (24 hours)
+    if (Date.now() - session.createdAt < 24 * 60 * 60 * 1000) {
+      return next();
+    } else {
+      sessions.delete(token); // Expired session
+    }
+  }
+
+  // If it's an API call, return JSON error
+  if (req.path.startsWith("/send-") || req.path.startsWith("/broadcast")) {
+    return res.status(401).json({
+      success: false,
+      error: "Unauthorized. Please provide valid authentication token.",
+    });
+  }
+
+  // For web pages, redirect to login
+  return res.redirect("/login");
+}
+
+/**
+ * Cookie parser middleware (simple implementation)
+ */
+app.use((req, res, next) => {
+  req.cookies = {};
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader) {
+    cookieHeader.split(";").forEach((cookie) => {
+      const [name, value] = cookie.trim().split("=");
+      req.cookies[name] = value;
+    });
+  }
+  next();
+});
+
+/**
+ * LOGIN PAGE
+ */
+app.get("/login", (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Login - WhatsApp API</title>
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+          height: 100vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .login-container {
+          background: white;
+          padding: 40px;
+          border-radius: 10px;
+          box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+          width: 100%;
+          max-width: 400px;
+        }
+        h1 {
+          color: #128C7E;
+          margin-bottom: 10px;
+          font-size: 28px;
+        }
+        p {
+          color: #666;
+          margin-bottom: 30px;
+        }
+        .form-group {
+          margin-bottom: 20px;
+        }
+        label {
+          display: block;
+          color: #333;
+          margin-bottom: 5px;
+          font-weight: 500;
+        }
+        input[type="text"],
+        input[type="password"] {
+          width: 100%;
+          padding: 12px;
+          border: 2px solid #ddd;
+          border-radius: 5px;
+          font-size: 14px;
+          transition: border-color 0.3s;
+        }
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+          outline: none;
+          border-color: #25D366;
+        }
+        button {
+          width: 100%;
+          padding: 12px;
+          background: #25D366;
+          color: white;
+          border: none;
+          border-radius: 5px;
+          font-size: 16px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: background 0.3s;
+        }
+        button:hover {
+          background: #128C7E;
+        }
+        .error {
+          background: #fee;
+          color: #c33;
+          padding: 10px;
+          border-radius: 5px;
+          margin-bottom: 20px;
+          display: none;
+        }
+        .error.show {
+          display: block;
+        }
+        .logo {
+          text-align: center;
+          margin-bottom: 20px;
+          font-size: 50px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="login-container">
+        <div class="logo">📱</div>
+        <h1>WhatsApp API</h1>
+        <p>Please login to continue</p>
+        
+        <div class="error" id="error"></div>
+        
+        <form id="loginForm">
+          <div class="form-group">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required autofocus>
+          </div>
+          
+          <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required>
+          </div>
+          
+          <button type="submit">Login</button>
+        </form>
+      </div>
+      
+      <script>
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          
+          const username = document.getElementById('username').value;
+          const password = document.getElementById('password').value;
+          const errorDiv = document.getElementById('error');
+          
+          try {
+            const response = await fetch('/api/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username, password })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+              // Store token in cookie
+              document.cookie = 'session_token=' + data.token + '; path=/; max-age=' + (24 * 60 * 60);
+              window.location.href = '/';
+            } else {
+              errorDiv.textContent = data.error || 'Login failed';
+              errorDiv.classList.add('show');
+            }
+          } catch (error) {
+            errorDiv.textContent = 'Network error. Please try again.';
+            errorDiv.classList.add('show');
+          }
+        });
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+/**
+ * LOGIN API
+ */
+app.post("/api/login", (req, res) => {
+  const { username, password } = req.body;
+
+  if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+    const token = generateSessionToken();
+    sessions.set(token, {
+      username: username,
+      createdAt: Date.now(),
+    });
+
+    res.json({
+      success: true,
+      token: token,
+      message: "Login successful",
+    });
+  } else {
+    res.status(401).json({
+      success: false,
+      error: "Invalid username or password",
+    });
+  }
+});
+
+/**
+ * LOGOUT
+ */
+app.get("/api/logout", (req, res) => {
+  const token = req.cookies?.session_token;
+  if (token) {
+    sessions.delete(token);
+  }
+  res.clearCookie("session_token");
+  res.redirect("/login");
+});
 
 /**
  * Creates a new WhatsApp client instance
@@ -40,7 +297,7 @@ function createWhatsAppClient(clientId) {
         "--no-first-run",
         "--no-zygote",
         "--disable-gpu",
-        "--disable-blink-features=AutomationControlled", // Hide automation
+        "--disable-blink-features=AutomationControlled",
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       ],
       executablePath: process.env.CHROME_PATH || undefined,
@@ -60,7 +317,6 @@ function createWhatsAppClient(clientId) {
     lastQRTimestamp: null,
   };
 
-  // QR Code event
   client.on("qr", (qr) => {
     console.log(
       `[${new Date().toISOString()}] QR Code received for ${clientId}`
@@ -69,14 +325,12 @@ function createWhatsAppClient(clientId) {
     clientData.lastQRTimestamp = Date.now();
   });
 
-  // Ready event
   client.on("ready", () => {
     console.log(`[${new Date().toISOString()}] Client ${clientId} is ready!`);
     clientData.isReady = true;
     clientData.qrCode = null;
   });
 
-  // Authenticated event
   client.on("authenticated", () => {
     console.log(
       `[${new Date().toISOString()}] Client ${clientId} authenticated`
@@ -85,7 +339,6 @@ function createWhatsAppClient(clientId) {
     clientData.qrCode = null;
   });
 
-  // Authentication failure event
   client.on("auth_failure", (msg) => {
     console.error(
       `[${new Date().toISOString()}] Auth failure for ${clientId}:`,
@@ -94,7 +347,6 @@ function createWhatsAppClient(clientId) {
     clientData.isAuthenticated = false;
   });
 
-  // Disconnected event
   client.on("disconnected", (reason) => {
     console.log(
       `[${new Date().toISOString()}] Client ${clientId} disconnected: ${reason}`
@@ -103,7 +355,6 @@ function createWhatsAppClient(clientId) {
     clientData.isAuthenticated = false;
   });
 
-  // Error event
   client.on("error", (error) => {
     console.error(
       `[${new Date().toISOString()}] Client ${clientId} error:`,
@@ -139,7 +390,7 @@ async function initializeClient(clientId, maxRetries = 3) {
       );
 
       if (retries < maxRetries) {
-        const delay = retries * 5000; // Exponential backoff
+        const delay = retries * 5000;
         console.log(`[${new Date().toISOString()}] Retrying in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
@@ -159,9 +410,9 @@ async function initializeClient(clientId, maxRetries = 3) {
 })();
 
 /**
- * HOME PAGE - API Documentation
+ * HOME PAGE - API Documentation (PROTECTED)
  */
-app.get("/", (req, res) => {
+app.get("/", requireAuth, (req, res) => {
   const clientsList = Object.keys(clients).map((id) => {
     const clientData = clients[id];
     return {
@@ -195,7 +446,8 @@ app.get("/", (req, res) => {
           background: #f5f5f5;
         }
         .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        h1 { color: #25D366; margin-top: 0; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        h1 { color: #25D366; margin: 0; }
         h2 { color: #128C7E; border-bottom: 2px solid #25D366; padding-bottom: 10px; }
         h3 { color: #075E54; }
         code { background: #f4f4f4; padding: 3px 6px; border-radius: 3px; font-family: monospace; }
@@ -242,6 +494,8 @@ app.get("/", (req, res) => {
         .btn:hover { background: #128C7E; }
         .btn-secondary { background: #3498db; }
         .btn-secondary:hover { background: #2980b9; }
+        .btn-danger { background: #e74c3c; }
+        .btn-danger:hover { background: #c0392b; }
         form { margin: 20px 0; }
         input[type="text"] {
           padding: 10px;
@@ -270,11 +524,29 @@ app.get("/", (req, res) => {
         .method-get { background: #3498db; color: white; }
         .method-post { background: #2ecc71; color: white; }
         .method-delete { background: #e74c3c; color: white; }
+        .alert {
+          padding: 12px;
+          border-radius: 4px;
+          margin-bottom: 20px;
+        }
+        .alert-info {
+          background: #d1ecf1;
+          color: #0c5460;
+          border-left: 4px solid #17a2b8;
+        }
       </style>
     </head>
     <body>
       <div class="container">
-        <h1>📱 WhatsApp API for Laravel CMS</h1>
+        <div class="header">
+          <h1>📱 WhatsApp API for Laravel CMS</h1>
+          <a href="/api/logout" class="btn btn-danger">Logout</a>
+        </div>
+        
+        <div class="alert alert-info">
+          <strong>🔒 Authenticated Session</strong> - You are logged in securely. Session valid for 24 hours.
+        </div>
+        
         <p>Node.js application using whatsapp-web.js for sending messages, reminders, and invoices via WhatsApp.</p>
         
         <h2>Active Clients</h2>
@@ -325,6 +597,11 @@ app.get("/", (req, res) => {
         </form>
         
         <h2>API Endpoints</h2>
+        
+        <div class="alert alert-info">
+          <strong>API Authentication:</strong> Include your session token in API requests:<br>
+          <code>Authorization: Bearer YOUR_TOKEN</code> or <code>?token=YOUR_TOKEN</code>
+        </div>
         
         <div class="endpoint">
           <h3><span class="method method-post">POST</span> /send-message</h3>
@@ -433,9 +710,9 @@ app.get("/", (req, res) => {
 });
 
 /**
- * CREATE CLIENT - Create a new WhatsApp client
+ * CREATE CLIENT - Create a new WhatsApp client (PROTECTED)
  */
-app.post("/create-client", async (req, res) => {
+app.post("/create-client", requireAuth, async (req, res) => {
   try {
     const { clientId } = req.body;
 
@@ -479,9 +756,9 @@ app.post("/create-client", async (req, res) => {
 });
 
 /**
- * QR CODE - Display QR code for authentication
+ * QR CODE - Display QR code for authentication (PROTECTED)
  */
-app.get("/qr", async (req, res) => {
+app.get("/qr", requireAuth, async (req, res) => {
   const clientId = req.query.clientId || defaultClientId;
   const forceRefresh = req.query.refresh === "true";
 
@@ -495,7 +772,6 @@ app.get("/qr", async (req, res) => {
 
   const clientData = clients[clientId];
 
-  // Force refresh if requested
   if (forceRefresh) {
     try {
       await clientData.client.destroy();
@@ -504,7 +780,6 @@ app.get("/qr", async (req, res) => {
       clients[clientId] = createWhatsAppClient(clientId);
       await initializeClient(clientId);
 
-      // Wait for QR code to be generated
       await new Promise((resolve) => setTimeout(resolve, 3000));
 
       return res.redirect(`/qr?clientId=${clientId}`);
@@ -513,7 +788,6 @@ app.get("/qr", async (req, res) => {
     }
   }
 
-  // Client is ready
   if (clientData.isReady && clientData.client.info) {
     return res.send(`
       <h2>✓ Client Connected</h2>
@@ -521,12 +795,11 @@ app.get("/qr", async (req, res) => {
       <p>User: <strong>${clientData.client.info.pushname}</strong></p>
       <p>Phone: <strong>${clientData.client.info.wid.user}</strong></p>
       <hr>
-      <a href="/logout?clientId=${clientId}">Logout</a> | 
+      <a href="/logout?clientId=${clientId}">Logout WhatsApp</a> | 
       <a href="/">Back to Home</a>
     `);
   }
 
-  // QR code available
   if (clientData.qrCode) {
     QRCode.toDataURL(clientData.qrCode, (err, url) => {
       if (err) {
@@ -551,7 +824,6 @@ app.get("/qr", async (req, res) => {
     return;
   }
 
-  // Waiting for QR code
   res.send(`
     <h2>Initializing...</h2>
     <p>Client ID: <strong>${clientId}</strong></p>
@@ -561,9 +833,9 @@ app.get("/qr", async (req, res) => {
 });
 
 /**
- * SEND MESSAGE - Send text/PDF message to a number
+ * SEND MESSAGE - Send text/PDF message to a number (PROTECTED)
  */
-app.post("/send-message", async (req, res) => {
+app.post("/send-message", requireAuth, async (req, res) => {
   try {
     const { number, message, pdfUrl, clientId = defaultClientId } = req.body;
 
@@ -625,9 +897,9 @@ app.post("/send-message", async (req, res) => {
 });
 
 /**
- * BROADCAST - Send message to multiple numbers
+ * BROADCAST - Send message to multiple numbers (PROTECTED)
  */
-app.post("/broadcast", async (req, res) => {
+app.post("/broadcast", requireAuth, async (req, res) => {
   try {
     const {
       numbers,
@@ -691,7 +963,6 @@ app.post("/broadcast", async (req, res) => {
         results.push({ number, success: true });
         console.log(`Message sent to ${number} (${i + 1}/${numbers.length})`);
 
-        // Delay between messages
         if (i < numbers.length - 1) {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
@@ -718,9 +989,9 @@ app.post("/broadcast", async (req, res) => {
 });
 
 /**
- * SEND IMAGE - Send image with caption
+ * SEND IMAGE - Send image with caption (PROTECTED)
  */
-app.post("/send-image", async (req, res) => {
+app.post("/send-image", requireAuth, async (req, res) => {
   try {
     const { number, imageUrl, caption, clientId = defaultClientId } = req.body;
 
@@ -769,9 +1040,9 @@ app.post("/send-image", async (req, res) => {
 });
 
 /**
- * STATUS - Get client connection status
+ * STATUS - Get client connection status (PROTECTED)
  */
-app.get("/status", async (req, res) => {
+app.get("/status", requireAuth, async (req, res) => {
   const clientId = req.query.clientId || defaultClientId;
 
   if (!clients[clientId]) {
@@ -812,9 +1083,9 @@ app.get("/status", async (req, res) => {
 });
 
 /**
- * LOGOUT - Logout and reset client
+ * LOGOUT - Logout and reset client (PROTECTED)
  */
-app.post("/logout", async (req, res) => {
+app.post("/logout", requireAuth, async (req, res) => {
   const clientId = req.query.clientId || defaultClientId;
 
   if (!clients[clientId]) {
@@ -828,7 +1099,6 @@ app.post("/logout", async (req, res) => {
     await clients[clientId].client.logout();
     await clients[clientId].client.destroy();
 
-    // Recreate client
     clients[clientId] = createWhatsAppClient(clientId);
     await initializeClient(clientId);
 
@@ -846,9 +1116,9 @@ app.post("/logout", async (req, res) => {
 });
 
 /**
- * RECONNECT - Force reconnect client
+ * RECONNECT - Force reconnect client (PROTECTED)
  */
-app.post("/reconnect", async (req, res) => {
+app.post("/reconnect", requireAuth, async (req, res) => {
   const clientId = req.query.clientId || defaultClientId;
 
   if (!clients[clientId]) {
@@ -878,9 +1148,9 @@ app.post("/reconnect", async (req, res) => {
 });
 
 /**
- * DELETE CLIENT - Remove a client instance
+ * DELETE CLIENT - Remove a client instance (PROTECTED)
  */
-app.delete("/delete-client/:clientId", async (req, res) => {
+app.delete("/delete-client/:clientId", requireAuth, async (req, res) => {
   const { clientId } = req.params;
 
   if (clientId === defaultClientId) {
@@ -924,10 +1194,13 @@ app.listen(port, () => {
 ║   WhatsApp API Server - Running on port ${port}             ║
 ║                                                            ║
 ║   📱 Open http://localhost:${port} to view API docs         ║
-║   🔗 Scan QR at http://localhost:${port}/qr                 ║
+║   🔒 Login: admin / whatsapp2024 (CHANGE THIS!)           ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
   `);
+
+  console.log("\n⚠️  IMPORTANT: Change default credentials in production!");
+  console.log("Set environment variables: AUTH_USERNAME and AUTH_PASSWORD\n");
 });
 
 // Graceful shutdown
