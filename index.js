@@ -126,9 +126,14 @@ function createWhatsAppClient(clientId) {
 
 // Initialize the default client with retry capabilities
 clients[defaultClientId] = createWhatsAppClient(defaultClientId);
-clients[defaultClientId].initializeWithRetry().catch((err) => {
-  console.error("Failed to initialize default client:", err);
-});
+clients[defaultClientId]
+  .initializeWithRetry()
+  .then(() => {
+    setupConnectionMonitoring(defaultClientId);
+  })
+  .catch((err) => {
+    console.error("Failed to initialize default client:", err);
+  });
 
 // Create endpoint to generate a new client
 app.post("/create-client", async (req, res) => {
@@ -155,6 +160,9 @@ app.post("/create-client", async (req, res) => {
           "There might be issues with browser dependencies. Check system requirements.",
       });
     }
+
+    // Add connection monitoring for new client
+    setupConnectionMonitoring(clientId);
 
     // Add connection monitoring for new client
     setupConnectionMonitoring(clientId);
@@ -634,7 +642,13 @@ app.get("/", (req, res) => {
 
 // Send to multiple recipients at once
 app.post("/broadcast", async (req, res) => {
-  const { numbers, message, pdfUrl, clientId = defaultClientId } = req.body;
+  const {
+    numbers,
+    message,
+    pdfUrl,
+    clientId = defaultClientId,
+    delayMs = 2000,
+  } = req.body;
 
   if (!numbers || !Array.isArray(numbers) || numbers.length === 0) {
     return res.status(400).json({ error: "Valid array of numbers is required" });
@@ -667,6 +681,7 @@ app.post("/broadcast", async (req, res) => {
 
   try {
     // Verify client state BEFORE starting
+    // Verify client state BEFORE starting
     const state = await client.getState();
     if (state !== "CONNECTED") {
       return res.status(503).json({
@@ -682,8 +697,17 @@ app.post("/broadcast", async (req, res) => {
       media = await MessageMedia.fromUrl(pdfUrl, { unsafeMime: true });
     }
 
-    for (const number of numbers) {
+    // Send messages with delay to avoid spam detection
+    for (let i = 0; i < numbers.length; i++) {
+      const number = numbers[i];
+
       try {
+        // Re-check connection state before each message
+        const currentState = await client.getState();
+        if (currentState !== "CONNECTED") {
+          throw new Error(`Client disconnected. State: ${currentState}`);
+        }
+
         // Re-check connection state before each message
         const currentState = await client.getState();
         if (currentState !== "CONNECTED") {
@@ -699,9 +723,28 @@ app.post("/broadcast", async (req, res) => {
         }
 
         results.push({ number, success: true });
+        console.log(`Message sent to ${number} (${i + 1}/${numbers.length})`);
+
+        // Add delay between messages (except after the last one)
+        if (i < numbers.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
       } catch (err) {
         console.error(`Failed to send to ${number}:`, err.message);
+        console.error(`Failed to send to ${number}:`, err.message);
         results.push({ number, success: false, error: err.message });
+
+        // If connection lost, stop the broadcast
+        if (
+          err.message.includes("disconnected") ||
+          err.message.includes("Protocol error")
+        ) {
+          return res.status(503).json({
+            error: "Connection lost during broadcast",
+            message: "Please reconnect the client",
+            results: results,
+          });
+        }
       }
     }
 
@@ -791,19 +834,35 @@ app.get("/status", async (req, res) => {
   }
 
   const client = clients[clientId].client;
-  const isConnected = client && client.info ? true : false;
 
-  res.json({
-    success: true,
-    client: clientId,
-    connected: isConnected,
-    info: isConnected
-      ? {
-          name: client.info.pushname,
-          phone: client.info.wid.user,
-        }
-      : null,
-  });
+  try {
+    // Check actual connection state, not just client.info
+    const state = await client.getState();
+    const isConnected = state === "CONNECTED";
+
+    res.json({
+      success: true,
+      client: clientId,
+      connected: isConnected,
+      state: state,
+      info:
+        isConnected && client.info
+          ? {
+              name: client.info.pushname,
+              phone: client.info.wid.user,
+            }
+          : null,
+    });
+  } catch (err) {
+    res.json({
+      success: false,
+      client: clientId,
+      connected: false,
+      state: "DISCONNECTED",
+      error: err.message,
+      info: null,
+    });
+  }
 });
 
 // Logout endpoint
@@ -980,3 +1039,36 @@ app.get("/system-check", async (req, res) => {
 app.listen(port, () => {
   console.log(`API server running on http://localhost:${port}`);
 });
+
+// Function to setup connection monitoring for a client
+function setupConnectionMonitoring(clientId) {
+  const client = clients[clientId].client;
+
+  // Monitor disconnection and auto-reconnect
+  client.on("disconnected", async (reason) => {
+    console.log(`Client ${clientId} disconnected: ${reason}`);
+
+    // Auto-reconnect after 5 seconds
+    setTimeout(async () => {
+      console.log(`Attempting to reconnect client ${clientId}...`);
+      try {
+        clients[clientId] = createWhatsAppClient(clientId);
+        await clients[clientId].initializeWithRetry();
+        setupConnectionMonitoring(clientId);
+      } catch (err) {
+        console.error(`Failed to reconnect ${clientId}:`, err);
+      }
+    }, 5000);
+  });
+
+  // Monitor authentication failures
+  client.on("auth_failure", async () => {
+    console.error(`Auth failure for ${clientId}, clearing session...`);
+    delete clients[clientId];
+  });
+
+  // Add change_state monitoring
+  client.on("change_state", (state) => {
+    console.log(`Client ${clientId} state changed to: ${state}`);
+  });
+}
