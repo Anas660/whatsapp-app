@@ -604,9 +604,12 @@ app.post("/send-message", async (req, res) => {
       const media = await MessageMedia.fromUrl(pdfUrl, { unsafeMime: true });
       await clientData.client.sendMessage(chatId, media, {
         caption: message || "",
+        sendSeen: false, // Add this option
       });
     } else {
-      await clientData.client.sendMessage(chatId, message);
+      await clientData.client.sendMessage(chatId, message, {
+        sendSeen: false, // Add this option
+      });
     }
 
     res.json({
